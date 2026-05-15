@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Node/Frontend
+node_modules/
+src/web-app/node_modules/
+src/web-app/dist/
+.npm
+.eslintcache
+
+# Databases & IDE
+*.db
+*.sqlite3
+.vscode/
+.idea/
+.DS_Store
+
+# Instant Client & Binaries
+instantclient/
+*.zip
+*.exe
+*.dll
+
+# Logs & Temp
+logs/
+*.log
+tmp/
+temp_copy.db
+out_*.txt
+out_*.json
+
+# Project specific ignores
+.agent/
+.playwright-cli/
+backup_audits/
+notebooklm_export/
+output/
+tmp_*/
+*.bak
+*.bak[0-9]*
+*.zip
+
+# Environment variables & Sensitive data
+.env
+.env.local
+.env.*.local
+config/.env
+config/Cadena_conexions.txt
+config/*.txt
+**/credentials.json
+**/*.key
+**/*.pem
+
+# Temporary files & Scratch
+scratch/
+tmp/
+tmp_*/
+*.bak
+*.bak[0-9]*
+temp_copy.db
+
+# Reports & Data outputs
+*.xlsx
+*.pdf
+reports/
+output/
+backup_audits/
+
+# OS/IDE
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
