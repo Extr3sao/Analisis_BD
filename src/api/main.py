@@ -373,8 +373,8 @@ async def get_knowledge(search: Optional[str] = None):
 async def ai_chat(query: str = Body(...), context: Optional[str] = Body(None), model: Optional[str] = Body(None)):
     """Interaccio amb l'assistent IA."""
     try:
-        current_model = model or config_loader.get_env_var("AI_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
-        assistant = AIAssistant(model_name=current_model)
+        current_model = model or internal_db.get_app_setting("OPENROUTER_MODEL") or config_loader.get_env_var("AI_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
+        assistant = AIAssistant(model_name=current_model, internal_db=internal_db)
         prompt = query if not context else f"Context addicional:\n{context}\n\nConsulta:\n{query}"
         response = assistant.generate_response(prompt)
         return {"response": response}
@@ -385,8 +385,8 @@ async def ai_chat(query: str = Body(...), context: Optional[str] = Body(None), m
 async def save_query(sql: str = Body(...), tags: List[str] = Body([]), model: str = Body(None)):
     """Analitza amb IA i guarda una consulta a la BBDD interna."""
     try:
-        current_model = model or config_loader.get_env_var("AI_MODEL", "google/gemini-2.0-flash-exp:free")
-        assistant = AIAssistant(model_name=current_model)
+        current_model = model or internal_db.get_app_setting("OPENROUTER_MODEL") or config_loader.get_env_var("AI_MODEL", "google/gemini-2.0-flash-exp:free")
+        assistant = AIAssistant(model_name=current_model, internal_db=internal_db)
         explanation = assistant.generate_response(
             "Explica breument aquesta consulta SQL Oracle i detecta riscos principals en 2-3 frases.\n\n"
             f"{sql}"
@@ -400,7 +400,8 @@ async def save_query(sql: str = Body(...), tags: List[str] = Body([]), model: st
 async def get_config():
     """Retorna la configuració actual d'IA de forma dinàmica."""
     try:
-        client = OpenRouterClient(settings=OpenRouterSettings.from_config(config_loader), config=config_loader)
+        settings = OpenRouterSettings.from_config(config_loader, internal_db=internal_db)
+        client = OpenRouterClient(settings=settings, config=config_loader)
         try:
             models = client.list_models()
             final_list = sorted(
@@ -411,21 +412,21 @@ async def get_config():
                 }
             )
         except Exception:
-            final_list = ["openrouter/free"]
+            final_list = ["google/gemini-2.0-flash-lite-preview-02-05:free", "openrouter/free"]
 
         selected_model, _ = client.select_model()
-        if "openrouter/free" not in final_list:
-            final_list.append("openrouter/free")
+        if not final_list:
+            final_list = ["google/gemini-2.0-flash-lite-preview-02-05:free", "openrouter/free"]
 
         return {
-            "current_model": config_loader.get_env_var("OPENROUTER_MODEL") or config_loader.get_env_var("AI_MODEL") or selected_model,
+            "current_model": settings.model or selected_model,
             "available_models": final_list
         }
     except Exception as e:
         print(f"Error a get_config: {e}")
         return {
-            "current_model": config_loader.get_env_var("OPENROUTER_MODEL") or config_loader.get_env_var("AI_MODEL") or "openrouter/free",
-            "available_models": ["openrouter/free"]
+            "current_model": internal_db.get_app_setting("OPENROUTER_MODEL") or "google/gemini-2.0-flash-lite-preview-02-05:free",
+            "available_models": ["google/gemini-2.0-flash-lite-preview-02-05:free", "openrouter/free"]
         }
 
 @app.post("/api/config/openrouter")
@@ -437,10 +438,54 @@ async def update_openrouter_key(key: str = Body(..., embed=True)):
         return {"status": "success"}
     raise HTTPException(status_code=500, detail="Error desant la clau")
 
+@app.get("/api/config/ai")
+async def get_ai_config():
+    """Retorna la configuració d'IA des de la BBDD interna o el .env."""
+    try:
+        api_key = internal_db.get_app_setting("OPENROUTER_API_KEY")
+        if not api_key:
+            api_key = config_loader.get_env_var("OPENROUTER_API_KEY", "")
+            
+        model = internal_db.get_app_setting("OPENROUTER_MODEL")
+        if not model:
+            model = config_loader.get_env_var("OPENROUTER_MODEL", "google/gemini-2.0-flash-lite-preview-02-05:free")
+            
+        enabled = internal_db.get_app_setting("AI_ENABLED", "1") == "1"
+        discover_free = internal_db.get_app_setting("AI_DISCOVER_FREE", "1") == "1"
+        
+        return {
+            "api_key": api_key,
+            "model": model,
+            "enabled": enabled,
+            "discover_free": discover_free
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/config/ai")
+async def save_ai_config(payload: Dict = Body(...)):
+    """Desa la configuració d'IA a la BBDD interna."""
+    try:
+        if "api_key" in payload:
+            internal_db.set_app_setting("OPENROUTER_API_KEY", payload["api_key"])
+        if "model" in payload:
+            internal_db.set_app_setting("OPENROUTER_MODEL", payload["model"])
+        if "enabled" in payload:
+            internal_db.set_app_setting("AI_ENABLED", "1" if payload["enabled"] else "0")
+        if "discover_free" in payload:
+            internal_db.set_app_setting("AI_DISCOVER_FREE", "1" if payload["discover_free"] else "0")
+            
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/config/openrouter")
 async def get_openrouter_key():
     """Retorna si hi ha una clau configurada (emmascarada)."""
-    key = config_loader.get_env_var("OPENROUTER_API_KEY", "")
+    key = internal_db.get_app_setting("OPENROUTER_API_KEY")
+    if not key:
+        key = config_loader.get_env_var("OPENROUTER_API_KEY", "")
+        
     if key:
         return {"configured": True, "masked": f"{key[:4]}...{key[-4:]}" if len(key) > 8 else "****"}
     return {"configured": False}
@@ -1598,8 +1643,8 @@ async def add_db(name: str = Body(...), user: str = Body(...), password: str = B
 async def import_queries(text: str = Body(...), model: Optional[str] = Body(None)):
     """Importa consultes des de text (format .txt), les analitza amb IA i les desa."""
     try:
-        current_model = model or config_loader.get_env_var("AI_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
-        assistant = AIAssistant(model_name=current_model)
+        current_model = model or internal_db.get_app_setting("OPENROUTER_MODEL") or config_loader.get_env_var("AI_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
+        assistant = AIAssistant(model_name=current_model, internal_db=internal_db)
         
         # Divideix el text per punts i comes o salts de lÃ­nia dobles per agafar consultes individuals
         raw_queries = [q.strip() for q in text.split(";") if q.strip()]
@@ -2048,7 +2093,7 @@ def _get_api_insights(profile: str, data: List[Dict]) -> str:
     """Demana a Gemini un resum executiu coherent i orientat a gestors."""
     try:
         from src.core.ai_assistant import AIAssistant
-        assistant = AIAssistant()
+        assistant = AIAssistant(internal_db=internal_db)
 
         schema_lines = []
         for d in data[:20]:
@@ -2282,45 +2327,6 @@ def _build_deep_pdf_report(profile: str, data: List[Dict]) -> bytes:
         print("Error generant PDF (Deep Scan) amb xhtml2pdf:", pisa_status.err)
     buffer.seek(0)
     return buffer.getvalue()
-
-
-def _get_api_insights(profile: str, data: List[Dict]) -> str:
-    """Genera un resum executiu utilitzant IA (Gemini)."""
-    try:
-        from src.core.ai_assistant import AIAssistant
-        assistant = AIAssistant()
-        
-        schema_lines = []
-        for item in data:
-            s = item.get("username") or (item.get("summary") or {}).get("USERNAME") or "N/A"
-            sum_data = item.get("summary") or {}
-            dec = item.get("audit_result", "PRECAUCIO")
-            score = int(_to_float(item.get("obsolescence_score")))
-            mida = _to_float(sum_data.get("SIZE_GB"))
-            in_deps = int(_to_float(sum_data.get("INBOUND_REFERENCES")))
-            jobs = int(_to_float(sum_data.get("ACTIVE_JOBS")))
-            apex = int(_to_float(sum_data.get("APEX_APPLICATIONS")))
-            trigs = int(_to_float(sum_data.get("ENABLED_TRIGGERS")))
-
-            if score >= 100 and (in_deps + jobs + apex + trigs) == 0 and dec == 'PRECAUCIO':
-                dec = 'ELIMINAR'
-
-            schema_lines.append(
-                f"- Esquema: {s} | Score: {score}% | Decisió: {dec} | "
-                f"Mida: {mida:.2f} GB | Deps.entrants: {in_deps} | "
-                f"Jobs: {jobs} | APEX: {apex} | Triggers: {trigs}"
-            )
-
-        total_schemas = len(data)
-        prompt = f"""Ets un DBA Oracle Sènior i Consultor Estratègic per al perfil '{profile}'. 
-DADES D'ENTRADA ({total_schemas} esquemes):
-{chr(10).join(schema_lines)}
-"""
-        return assistant.generate_response(prompt)
-    except Exception as e:
-        print(f"Error generant insights: {e}")
-        return "IA no disponible."
-
 
 @app.post("/api/report/generate")
 async def generate_report(payload: Dict = Body(...)):

@@ -26,9 +26,18 @@ export default function ConfigurationView() {
   const [isSaving, setIsSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(null);
   const [isTesting, setIsTesting] = useState(null);
+  
+  const [aiConfig, setAiConfig] = useState({
+    apiKey: '',
+    model: 'google/gemini-2.0-flash-lite-preview-02-05:free',
+    enabled: true,
+    discoverFree: true
+  });
+  const [isSavingAi, setIsSavingAi] = useState(false);
 
   useEffect(() => {
     fetchConnections();
+    fetchAiConfig();
   }, []);
 
   const fetchConnections = async () => {
@@ -162,6 +171,47 @@ export default function ConfigurationView() {
       setError(err.message);
     } finally {
       setIsTesting(null);
+    }
+  };
+
+  const fetchAiConfig = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/config/ai`);
+      if (res.ok) {
+        const data = await res.json();
+        setAiConfig({
+          apiKey: data.api_key || '',
+          model: data.model || 'google/gemini-2.0-flash-lite-preview-02-05:free',
+          enabled: data.enabled ?? true,
+          discoverFree: data.discover_free ?? true
+        });
+      }
+    } catch (err) {
+      console.error("Error carregant config IA:", err);
+    }
+  };
+
+  const handleSaveAiConfig = async () => {
+    try {
+      setIsSavingAi(true);
+      setError(null);
+      const res = await fetch(`${API_BASE}/config/ai`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          api_key: aiConfig.apiKey,
+          model: aiConfig.model,
+          enabled: aiConfig.enabled,
+          discover_free: aiConfig.discoverFree
+        })
+      });
+      if (!res.ok) throw new Error("No s'ha pogut guardar la configuració d'IA");
+      setSuccessMsg("Configuració d'IA guardada correctament");
+      setTimeout(() => setSuccessMsg(null), 3000);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setIsSavingAi(false);
     }
   };
 
@@ -440,6 +490,89 @@ export default function ConfigurationView() {
           </div>
         </div>
       )}
+      <div className="bg-card border border-border rounded-lg shadow-sm overflow-hidden mt-6">
+        <div className="p-6 border-b border-border bg-muted/20">
+          <h3 className="text-lg font-bold flex items-center gap-2">
+            <span className="p-1.5 bg-primary/10 text-primary rounded-md">
+              <Play size={18} />
+            </span>
+            Configuració d'Intel·ligència Artificial
+          </h3>
+          <p className="text-sm text-muted-foreground mt-1">
+            Configura la connexió amb OpenRouter per habilitar l'anàlisi de codi i les recomanacions automàtiques.
+          </p>
+        </div>
+        
+        <div className="p-6 space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <label className="text-sm font-medium flex items-center gap-2">
+                OpenRouter API Key
+                <span className="text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded uppercase font-bold">Privat</span>
+              </label>
+              <div className="relative">
+                <input 
+                  type="password" 
+                  value={aiConfig.apiKey}
+                  onChange={e => setAiConfig({...aiConfig, apiKey: e.target.value})}
+                  className="w-full px-3 py-2 border border-border rounded-md bg-background pr-10"
+                  placeholder="sk-or-v1-..."
+                />
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                La clau es guarda localment a la teva base de dades i no es comparteix mai.
+              </p>
+            </div>
+            
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Model d'IA per defecte</label>
+              <select 
+                value={aiConfig.model}
+                onChange={e => setAiConfig({...aiConfig, model: e.target.value})}
+                className="w-full px-3 py-2 border border-border rounded-md bg-background"
+              >
+                <option value="google/gemini-2.0-flash-lite-preview-02-05:free">Gemini 2.0 Flash Lite (Recomanat - Free)</option>
+                <option value="google/gemini-2.0-pro-exp-02-05:free">Gemini 2.0 Pro (Free)</option>
+                <option value="deepseek/deepseek-chat:free">DeepSeek V3 (Free)</option>
+                <option value="openrouter/auto">Selecció automàtica OpenRouter</option>
+              </select>
+            </div>
+          </div>
+          
+          <div className="flex items-center gap-4 pt-2">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input 
+                type="checkbox" 
+                checked={aiConfig.enabled}
+                onChange={e => setAiConfig({...aiConfig, enabled: e.target.checked})}
+                className="w-4 h-4 text-primary rounded border-border focus:ring-primary"
+              />
+              <span className="text-sm font-medium">Habilitar funcions d'IA</span>
+            </label>
+            
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input 
+                type="checkbox" 
+                checked={aiConfig.discoverFree}
+                onChange={e => setAiConfig({...aiConfig, discoverFree: e.target.checked})}
+                className="w-4 h-4 text-primary rounded border-border focus:ring-primary"
+              />
+              <span className="text-sm font-medium">Prioritzar sempre models gratuïts</span>
+            </label>
+          </div>
+          
+          <div className="flex justify-end border-t border-border pt-6">
+            <button 
+              onClick={handleSaveAiConfig}
+              disabled={isSavingAi}
+              className="flex items-center gap-2 px-6 py-2 bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/80 transition-colors disabled:opacity-50 font-medium"
+            >
+              {isSavingAi ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle size={16} />}
+              Guardar Configuració IA
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

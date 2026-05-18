@@ -1,0 +1,54 @@
+import { chromium } from 'playwright';
+import { spawn } from 'node:child_process';
+import { mkdir, rm, copyFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import process from 'node:process';
+
+const repoRoot = process.cwd();
+const webAppRoot = path.join(repoRoot, 'src', 'web-app');
+const outputDir = path.join(webAppRoot, 'output', 'playwright', 'oracle-debug');
+const envDir = path.join(outputDir, 'env');
+const backendPort = 8014;
+const vitePort = 4178;
+const profile = 'E13DB';
+const schema = 'ABOIX';
+const connectionsFile = path.join(repoRoot, 'config', 'Cadena_conexions.txt');
+const internalDbPath = path.join(envDir, 'internal.oracle-debug.db');
+const automationDbPath = path.join(envDir, 'automation.oracle-debug.db');
+await mkdir(envDir, { recursive: true });
+await rm(internalDbPath, { force: true });
+await rm(automationDbPath, { force: true });
+await copyFile(path.join(repoRoot, 'src', 'db', 'internal.db'), internalDbPath);
+const backendEnv = { ...process.env, CONNECTIONS_FILE: connectionsFile, DEFAULT_PROFILE: profile, INTERNAL_DB_PATH: internalDbPath, AUTOMATION_DB_PATH: automationDbPath };
+const viteEnv = { ...process.env, VITE_API_PROXY_TARGET: `http://127.0.0.1:${backendPort}`, BROWSER: 'none' };
+function start(command, args, cwd, env) { const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }); child.stdout.on('data', c => process.stdout.write(c)); child.stderr.on('data', c => process.stderr.write(c)); return child; }
+function wait(ms){ return new Promise(r=>setTimeout(r,ms)); }
+async function waitFor(url, timeout=45000){ const deadline = Date.now()+timeout; while(Date.now()<deadline){ try{ const res=await fetch(url); if(res.ok) return; }catch{} await wait(500);} throw new Error('timeout '+url); }
+const backend = start('cmd.exe', ['/d','/s','/c', `.\\.venv\\Scripts\\python.exe -m uvicorn src.api.main:app --host 127.0.0.1 --port ${backendPort}`], repoRoot, backendEnv);
+await waitFor(`http://127.0.0.1:${backendPort}/api/profiles`);
+const vite = start('cmd.exe', ['/d','/s','/c', `npm run dev -- --host 127.0.0.1 --port ${vitePort} --strictPort`], webAppRoot, viteEnv);
+await waitFor(`http://127.0.0.1:${vitePort}`);
+const browser = await chromium.launch({ channel:'msedge', headless:true }).catch(() => chromium.launch({ headless:true }));
+const page = await (await browser.newContext()).newPage();
+page.on('response', async (res) => { if (res.url().includes('/api/audit/post-crq/run')) console.log('RUN_RESPONSE', res.status()); });
+await page.goto(`http://127.0.0.1:${vitePort}`, { waitUntil:'domcontentloaded' });
+await page.getByRole('button', { name: /^An.*obsolets/i }).click();
+await page.getByPlaceholder('Ex: MGR_APP, USER_DB...').fill(schema);
+await page.getByRole('button', { name: /^Auditar$/i }).click();
+await page.waitForFunction((value) => document.body.innerText.includes(value), `Detalls: ${schema}`, { timeout: 120000 });
+await page.getByRole('button', { name: /Auditoria de canvis/i }).click();
+await page.waitForFunction(() => document.body.innerText.includes('CHECK_01'), { timeout: 30000 });
+await page.getByPlaceholder('APP_USER, CORE_DB').fill(schema);
+await page.getByRole('button', { name: /^Tots$/i }).click();
+console.log('before execute disabled', await page.getByRole('button', { name: /^Executar$/i }).isDisabled());
+await page.getByRole('button', { name: /^Executar$/i }).click();
+await wait(8000);
+console.log('has resumen', await page.evaluate(() => document.body.innerText.includes('Resum executiu per lots')));
+console.log('has zip', await page.evaluate(() => document.body.innerText.includes('Descarregar ZIP')));
+console.log('has resum', await page.evaluate(() => document.body.innerText.includes('Descarregar resum')));
+console.log('body sample start');
+console.log((await page.locator('body').innerText()).slice(0, 5000));
+console.log('body sample end');
+await page.screenshot({ path: path.join(outputDir, 'oracle-debug.png'), fullPage: true });
+await browser.close();
+backend.kill(); vite.kill();

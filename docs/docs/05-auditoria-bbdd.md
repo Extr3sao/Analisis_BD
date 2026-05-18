@@ -39,14 +39,17 @@ sequenceDiagram
 - **Format**: Llista separada per comes en majúscules: `APP_USER, CORE_DB`
 - **Comportament per defecte**: Si es deixa buit, Oracle retorna tots els objectes visibles per l'usuari de connexió
 
-### Finestra temporal
+### Finestra temporal i Paràmetres Dinàmics de Dates
 
-El sistema suporta dos modes de filtre temporal:
+Per evitar auditar innecessàriament objectes que no han estat modificats en el rang del canvi (CRQ), el sistema implementa filtres temporals robusts:
 
-| Mode | Descripció | Exemple |
-|------|-----------|---------|
-| **Preset** | Intervals predefinits | `Diari`, `Setmanal`, `Mensual` |
-| **Rang** | Dates d'inici i fi manuals | `2026-01-15` → `2026-01-20` |
+| Mode | Paràmetres Backend | Descripció | Ús / Exemple |
+|------|--------------------|------------|--------------|
+| **Preset** | `days_back` | Filtre relatiu basat en dies | `Diari` (1 dia), `Setmanal` (7 dies), `Mensual` (30 dies) |
+| **Rang de dates** | `&start_at` i `&end_at` | Dates d'inici i fi reals | `2026-01-15` → `2026-01-20` (Format `YYYY-MM-DD`) |
+
+> [!IMPORTANT]
+> **Injecció de paràmetres dinàmics de data**: A les consultes mestre com el `CHECK_01` (i d'altres), el backend de FastAPI valida prèviament la integritat del format dels filtres temporals triats de la interfície. Posteriorment, injecta i enllaça de forma dinàmica i segura les variables `&start_at` i `&end_at` a la crida Oracle, prevenint qualsevol error de sintaxi SQL pre-execució i reduint el consum de CPU del motor Oracle.
 
 ### Opcions de planificador (scheduler)
 
@@ -93,21 +96,37 @@ Cada check té:
 
 ## Detall de checks rellevants
 
-### CHECK_11: Problemes de codi en paquets/procedures/funcions
+### CHECK_11: Problemes de codi en paquets/procedures/funcions (Enriquit amb IA)
 
-**Severitat**: ALT
+**Severitat**: ALT (🔴 **Crític**)
 
-Detecta la **proximitat heurística** entre sentències d'inici de bucle (`LOOP`, `FOR ... IN`) i operacions DML (`INSERT INTO`, `UPDATE`, `DELETE FROM`, `SELECT ... INTO`) en un radi de menys de **25 línies** dins d'objectes PL/SQL modificats recentment, sempre que el codi **no** usi `BULK COLLECT` ni `FORALL`.
+Aquest check detecta la **proximitat heurística** entre sentències d'inici de bucle (`LOOP`, `FOR ... IN`) i operacions DML (`INSERT INTO`, `UPDATE`, `DELETE FROM`, `SELECT ... INTO`) en un radi de menys de **25 línies** dins d'objectes PL/SQL modificats recentment (en el rang temporal de dades triat), sempre que el codi **no** usi operacions de càrrega massiva com `BULK COLLECT` o `FORALL`. Aquest patró genera greus colls d'ampolla a causa del canvi de context constant entre el motor PL/SQL i el motor SQL (problema conegut com a consulta asíncrona N+1).
 
-**Com funciona** (SQL pur, sense IA):
-1. Identifica les línies amb patrons `INICI_LOOP` i `DML_SOSPITOS` dins del codi font Oracle (`dba_source`).
-2. Calcula la distància entre elles per objecte (PROCEDURE, FUNCTION, PACKAGE BODY, TRIGGER).
-3. Si distància < 25 línies i no hi ha `BULK COLLECT` al mateix objecte → marca com a troballa.
+#### Procés d'Execució en 2 Fases:
 
-**Columnes retornades**: `esquema`, `objecte`, `tipus`, `detall_auditoria`
+```mermaid
+graph TD
+    A[Execució SQL a Oracle] -->|Troballes de codi cru| B[Parser de font PL/SQL]
+    B -->|Envia blocs LOOP/DML a IA| C{Mòdul d'IA actiu?}
+    C -->|Sí| D[Anàlisi Semàntica OpenRouter]
+    D -->|Classificació de risc| E[Respostes i Caching SQLite]
+    C -->|No / Timeout / Fallback| F[Resultat Cru d'Oracle]
+    E --> G[Visualització Consolidada HUD]
+    F --> G
+```
 
-> [!NOTE]
-> El CHECK_11 és un check SQL estàndard. **No hi ha integració amb IA** en aquest check. El seu resultat és determinista i immediat.
+1. **Fase 1 — Detecció Determinista**: L'aplicació executa una query optimitzada a Oracle contra `dba_source` per extreure les línies de codi PL/SQL sospitoses amb LOOPs i DMLs molt propers, juntament amb el context de línies de l'objecte (procediment, funció, paquet).
+2. **Fase 2 — Enriquiment i Classificació Semàntica (IA)**: El motor d'auditoria envia asíncronament els blocs de codi de cada troballa a l'assistent d'IA (`AIAssistant` via `OpenRouterClient`). L'IA analitza semànticament el flux del programa i el classifica en:
+   - **`mala_praxis`**: Riscos de rendiment reals que requereixen refactorització a càrrega massiva.
+   - **`falso_positivo`**: Fluxos on el bucle és extremadament curt (ex: 2 o 3 iteracions determinades per codi) o té finalitat de bypass vàlida.
+   - L'IA genera a l'instant un **diagnòstic detallat i una proposta de codi refactoritzada** en llenguatge natural.
+
+#### Caching d'Explicacions i Resiliència (Fallback)
+
+- **Estalvi i Caching local**: Els diagnòstics i explicacions generats per l'IA per a un codi o objecte específic es guarden en una taula a la base de dades local **`internal.db`**. Si el codi d'aquell objecte no ha variat en auditories posteriors, el Dashboard reutilitza a l'instant el diagnòstic de la cache de SQLite, estalviant temps i costos de crides a l'API.
+- **Mecanisme resilient de degradació (Fallback)**: Si no s'ha configurat cap `OPENROUTER_API_KEY`, si el servei d'OpenRouter dona un timeout, o s'esgoten les quotes, l'auditoria Post-CRQ **no es bloqueja ni falla**. El sistema processa la fallada de forma transparent, registra la incidència i presenta l'auditoria amb els resultats crus deterministes d'Oracle al Dashboard, garantint el govern de l'auditoria en qualsevol situació.
+
+**Columnes retornades**: `esquema`, `objecte`, `tipus`, `detall_auditoria` (enriquit amb el JSON de diagnòstic d'IA, explicació i severitat semàntica).
 
 ### CHECK_12: Candidats per a Bulk Collect / càrrega massiva
 

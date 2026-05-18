@@ -34,25 +34,40 @@ class OpenRouterSettings:
     discover_free_model: bool
 
     @classmethod
-    def from_config(cls, config: Optional[ConfigLoader] = None) -> "OpenRouterSettings":
+    def from_config(cls, config: Optional[ConfigLoader] = None, internal_db: Any = None) -> "OpenRouterSettings":
         config = config or ConfigLoader()
-        model = (
-            config.get_env_var("OPENROUTER_MODEL")
-            or config.get_env_var("AI_MODEL")
-            or ""
-        ).strip()
-        timeout_raw = config.get_env_var("OPENROUTER_TIMEOUT_MS", "30000")
+        
+        # Prioritat: 1. Internal DB (Configurada via Web), 2. Env Var (.env)
+        def get_val(key, default=""):
+            val = None
+            if internal_db:
+                val = internal_db.get_app_setting(key)
+            if val is None:
+                val = config.get_env_var(key, default)
+            return val
+
+        def get_flag(key, default=False):
+            val = None
+            if internal_db:
+                val = internal_db.get_app_setting(key)
+            if val is not None:
+                return str(val).strip().lower() in {"1", "true", "yes", "on"}
+            return _env_flag(config.get_env_var(key), default=default)
+
+        model = (get_val("OPENROUTER_MODEL") or get_val("AI_MODEL") or "").strip()
+        timeout_raw = get_val("OPENROUTER_TIMEOUT_MS", "30000")
         try:
             timeout_ms = max(1000, int(timeout_raw))
         except (TypeError, ValueError):
             timeout_ms = 30000
+            
         return cls(
-            enabled=_env_flag(config.get_env_var("OPENROUTER_ENABLED"), default=False),
-            api_key=(config.get_env_var("OPENROUTER_API_KEY", "") or "").strip(),
+            enabled=get_flag("AI_ENABLED", default=get_flag("OPENROUTER_ENABLED", default=False)),
+            api_key=(get_val("OPENROUTER_API_KEY", "") or "").strip(),
             model=model,
             timeout_ms=timeout_ms,
-            base_url=(config.get_env_var("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1") or "https://openrouter.ai/api/v1").rstrip("/"),
-            discover_free_model=_env_flag(config.get_env_var("OPENROUTER_DISCOVER_FREE_MODEL"), default=False),
+            base_url=(get_val("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1") or "https://openrouter.ai/api/v1").rstrip("/"),
+            discover_free_model=get_flag("AI_DISCOVER_FREE", default=get_flag("OPENROUTER_DISCOVER_FREE_MODEL", default=True)),
         )
 
 

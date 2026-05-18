@@ -203,6 +203,13 @@ class InternalDBManager:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
             # Poblar model_config amb la llista prioritzada si és buida
             cursor.execute("SELECT COUNT(*) FROM model_config")
@@ -560,3 +567,21 @@ class InternalDBManager:
             cursor.execute("DELETE FROM database_connections WHERE id = ?", (conn_id,))
             conn.commit()
             return cursor.rowcount > 0
+
+    # --- App Settings (AI keys, etc) ---
+    def get_app_setting(self, key: str, default: Any = None) -> Any:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            return row[0] if row else default
+
+    def set_app_setting(self, key: str, value: Any) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+                (key, str(value))
+            )
+            conn.commit()
+            return True

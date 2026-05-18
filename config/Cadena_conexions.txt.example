@@ -1,0 +1,9 @@
+## DESENVOLUPAMENT
+USER = mi_usuario
+PASSWORD = mi_password
+DSN = host.dominio.com:1521/nombre_servicio
+
+## PRODUCCION
+USER = usuario_prod
+PASSWORD = password_prod
+DSN = host_prod:1521/servicio_prod
