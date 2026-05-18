@@ -1,5 +1,6 @@
 import oracledb
 import os
+import sys
 import logging
 import re
 
@@ -11,12 +12,18 @@ class OracleDBManager:
         self._connect_failed = False
         self.logger = logging.getLogger(__name__)
         
+        # Cerca de directori d'Instant Client portable local al costat de l'executable o a l'arrel
+        exe_dir = os.path.dirname(sys.executable) if hasattr(sys, 'frozen') else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        local_instant_client = os.path.join(exe_dir, "instantclient")
+        
         # Intentar inicialitzar mode Thick si es troba la ruta del client.
         lib_dir = (
             config.get("ORACLE_CLIENT_LIB_DIR")
             or os.getenv("ORACLE_CLIENT_LIB_DIR")
+            or (local_instant_client if os.path.exists(local_instant_client) else None)
             or os.getenv("OCI_LIB_DIR")
         )
+
         if lib_dir and os.path.exists(lib_dir):
             try:
                 # Assegurar ruta absoluta per evitar problemes amb caràcters especials
