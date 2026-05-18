@@ -199,33 +199,19 @@ Variables utiles:
 
 ## Arrencada
 
-### Arrencada des de zero en un PC nou (Guia Ràpida) 🚀
+### 🌟 Mètode Recomanat: Opció unificada amb script (`run.ps1`)
 
-Si acabes de descarregar el projecte de GitHub en un ordinador nou, segueix aquests passos per configurar l'entorn virtual de Python i instal·lar totes les dependències automàticament sense errors de noms o de versions:
+La forma més ràpida, segura i recomanada d'iniciar el projecte en un ordinador nou (evitant qualsevol error de configuració manual o de rutes) és utilitzar l'script unificat `run.ps1`.
 
-1. **Verifica Python:** Assegura't de tenir instal·lat Python (versió 3.10 o superior). *Molt important:* Durant la instal·lació a Windows, marca la casella **`Add python.exe to PATH`** a la primera pantalla de l'instal·lador.
-2. **Obre la terminal (PowerShell):** Navega fins a la carpeta del projecte descarregat:
-   ```powershell
-   cd "C:\Ruta\a\la\teva\carpeta\del\projecte"
-   ```
-3. **Crea l'entorn virtual (.venv):**
-   ```powershell
-   python -m venv .venv
-   ```
-4. **Instal·la totes les dependències:** En lloc d'instal·lar paquets manualment d'un en un, utilitza el fitxer `requirements.txt` per instal·lar les 24 llibreries correctes (incloent `oracledb` i `uvicorn`) de forma aïllada i 100% segura:
-   ```powershell
-   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-   ```
-5. **Inicia el Backend:**
-   ```powershell
-   .\.venv\Scripts\uvicorn.exe src.api.main:app --host 127.0.0.1 --port 8000
-   ```
+**⚠️ Requisits previs indispensables al nou PC:**
+1. **Python (3.10+):** Durant la instal·lació a Windows, assegura't de marcar la casella **`Add python.exe to PATH`**.
+2. **Node.js (v18+):** És obligatori tenir Node instal·lat perquè l'script pugui compilar automàticament el frontend de React.
 
----
-
-### Opció unificada amb scripts (.ps1)
-
-`run.ps1` (Executa automatitzadament la creació de l'entorn virtual, la instal·lació de dependències de Python i Node, la compilació del frontend i l'arrencada d'Uvicorn):
+Aquest script s'encarrega de tot el procés automàticament:
+- Crear l'entorn virtual `.venv` si no existeix.
+- Instal·lar les dependències de Python des de `requirements.txt`.
+- Instal·lar les dependències de Node (`npm install`) i compilar el frontend (`npm run build`).
+- Iniciar el servidor FastAPI/Uvicorn correctament apuntant a `src.api.main:app`.
 
 Per executar-ho de forma segura saltant-se les restriccions d'execució de Windows, obre PowerShell a la carpeta del projecte i executa:
 ```powershell
@@ -239,14 +225,42 @@ powershell -ExecutionPolicy Bypass -File .\run-clean.ps1
 
 ---
 
-### Opció manual (Rutes relatives)
+### Arrencada manual pas a pas (Guia Detallada) 🚀
+
+Si prefereixes realitzar el procés manualment o estàs configurant un entorn de desenvolupament a mida, segueix aquests passos en ordre:
+
+1. **Verifica Python i Node:** Assegura't de tenir instal·lats Python (amb `Add python.exe to PATH`) i Node.js.
+2. **Obre la terminal (PowerShell):** Navega fins a la carpeta del projecte descarregat:
+   ```powershell
+   cd "C:\Ruta\a\la\teva\carpeta\del\projecte"
+   ```
+3. **Crea i configura l'entorn virtual de Python:**
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+   ```
+4. **Compila el Frontend (React/Vite):**
+   ```powershell
+   cd src\web-app
+   npm install
+   npm run build
+   cd ..\..
+   ```
+5. **Inicia el Backend:**
+   ```powershell
+   .\.venv\Scripts\uvicorn.exe src.api.main:app --host 127.0.0.1 --port 8000
+   ```
+
+---
+
+### Opció manual per a desenvolupament (Rutes relatives)
 
 Backend:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-uvicorn src.api.main:app --host 127.0.0.1 --port 8000
+uvicorn src.api.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 
