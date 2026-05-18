@@ -1,4 +1,4 @@
-﻿# Dashboard E13BD
+# Dashboard E13BD
 
 Portal intern per a auditoria Oracle, control post-CRQ i automatitzacions de distribucio d'informes.
 
@@ -199,26 +199,56 @@ Variables utiles:
 
 ## Arrencada
 
-### Opcio unificada
+### Arrencada des de zero en un PC nou (Guia Ràpida) 🚀
 
-`run.ps1`:
+Si acabes de descarregar el projecte de GitHub en un ordinador nou, segueix aquests passos per configurar l'entorn virtual de Python i instal·lar totes les dependències automàticament sense errors de noms o de versions:
 
-1. crea `.venv` si no existeix
-2. installa dependencies Python
-3. entra a `src/web-app`
-4. installa dependencies Node si cal
-5. executa `npm run build`
-6. arrenca `uvicorn src.api.main:app --host 127.0.0.1 --port 8000`
+1. **Verifica Python:** Assegura't de tenir instal·lat Python (versió 3.10 o superior). *Molt important:* Durant la instal·lació a Windows, marca la casella **`Add python.exe to PATH`** a la primera pantalla de l'instal·lador.
+2. **Obre la terminal (PowerShell):** Navega fins a la carpeta del projecte descarregat:
+   ```powershell
+   cd "C:\Ruta\a\la\teva\carpeta\del\projecte"
+   ```
+3. **Crea l'entorn virtual (.venv):**
+   ```powershell
+   python -m venv .venv
+   ```
+4. **Instal·la totes les dependències:** En lloc d'instal·lar paquets manualment d'un en un, utilitza el fitxer `requirements.txt` per instal·lar les 24 llibreries correctes (incloent `oracledb` i `uvicorn`) de forma aïllada i 100% segura:
+   ```powershell
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+   ```
+5. **Inicia el Backend:**
+   ```powershell
+   .\.venv\Scripts\uvicorn.exe src.api.main:app --host 127.0.0.1 --port 8000
+   ```
 
-### Opcio manual
+---
+
+### Opció unificada amb scripts (.ps1)
+
+`run.ps1` (Executa automatitzadament la creació de l'entorn virtual, la instal·lació de dependències de Python i Node, la compilació del frontend i l'arrencada d'Uvicorn):
+
+Per executar-ho de forma segura saltant-se les restriccions d'execució de Windows, obre PowerShell a la carpeta del projecte i executa:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run.ps1
+```
+
+Si vols forçar una arrencada neta (alliberant ports vells i reinstal·lant de zero):
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run-clean.ps1
+```
+
+---
+
+### Opció manual (Rutes relatives)
 
 Backend:
 
 ```powershell
-.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 uvicorn src.api.main:app --host 127.0.0.1 --port 8000
 ```
+
 
 Frontend en desenvolupament:
 
