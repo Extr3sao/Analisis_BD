@@ -2749,17 +2749,23 @@ async def update_obsolet(obj_id: int, payload: Dict = Body(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Servir fitxers estÃ tics del frontend
-frontend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "web-app", "dist"))
+# Servir fitxers estàtics del frontend (compatibilitat desenvolupament i PyInstaller)
+if hasattr(sys, '_MEIPASS'):
+    frontend_path = os.path.abspath(os.path.join(sys._MEIPASS, "src", "web-app", "dist"))
+    manual_path = os.path.abspath(os.path.join(sys._MEIPASS, "docs", "build"))
+else:
+    frontend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "web-app", "dist"))
+    manual_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "docs", "build"))
+
 print(f"DEBUG: Buscant frontend a: {frontend_path}")
 
 # Muntem el manual de Docusaurus si existeix (accessible a /docs)
-manual_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "docs", "build"))
 if os.path.exists(manual_path):
     print(f"DEBUG: Muntant manual a: {manual_path}")
     app.mount("/docs", StaticFiles(directory=manual_path, html=True), name="manual_docs")
 else:
     print(f"WARNING: No s'ha trobat la carpeta 'docs/build'. El manual interactiu no estarà disponible.")
+
 
 # Servir fitxers estàtics del frontend (React SPA)
 if os.path.exists(frontend_path):
@@ -2800,8 +2806,13 @@ else:
 
 if __name__ == "__main__":
     import uvicorn
-    # Use string "main:app" for reload to work correctly
-    uvicorn.run("src.api.main:app", host="0.0.0.0", port=8000, reload=True)
+    # Si s'executa com a executable empaquetat per PyInstaller
+    if hasattr(sys, 'frozen'):
+        uvicorn.run(app, host="127.0.0.1", port=8000)
+    else:
+        # En mode de desenvolupament normal usem recàrrega automàtica
+        uvicorn.run("src.api.main:app", host="0.0.0.0", port=8000, reload=True)
+
 
 
 
