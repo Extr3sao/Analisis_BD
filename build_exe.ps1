@@ -1,6 +1,6 @@
 # build_exe.ps1
 # Script de compilació automàtica a executable independent de Windows (.exe)
-# Dashboard E13BD v4.6 - Premier Edition
+# Dashboard E13BD v4.6 - Premier Edition con Oracle Instant Client Portable
 
 # Configuració de la sortida de consola en UTF-8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -20,6 +20,38 @@ Write-Host "`n[1/5] Iniciant entorn de Python i verificant dependències..." -Fo
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python -m pip install pyinstaller
+
+# 1.1 Descàrrega automàtica de l'Oracle Instant Client per a mode Portable (Nivell 2)
+$INSTANT_CLIENT_DIR = "instantclient"
+if (-not (Test-Path $INSTANT_CLIENT_DIR)) {
+    Write-Host "`n[INFO] No s'ha trobat la carpeta local 'instantclient'." -ForegroundColor Yellow
+    Write-Host "-> Descarregant Oracle Instant Client Basic Lite per a portabilitat total (aprox. 30MB)..." -ForegroundColor Green
+    $URL = "https://download.oracle.com/otn_software/nt/instantclient/213000/instantclient-basiclite-windows.x64-21.3.0.0.0.zip"
+    $ZIP_PATH = "instantclient.zip"
+    
+    try {
+        # Descarregar fitxer zip
+        $webClient = New-Object System.Net.WebClient
+        $webClient.DownloadFile($URL, $ZIP_PATH)
+        
+        Write-Host "-> Descomprimint Instant Client..." -ForegroundColor Green
+        # Descomprimir a una carpeta temporal
+        if (Test-Path "temp_instantclient") { Remove-Item -Recurse -Force "temp_instantclient" }
+        Expand-Archive -Path $ZIP_PATH -DestinationPath "temp_instantclient" -Force
+        
+        # El zip conté la carpeta instantclient_21_3. La movem a l'arrel com a "instantclient"
+        Move-Item -Path "temp_instantclient\instantclient_21_3" -Destination $INSTANT_CLIENT_DIR
+        
+        # Neteja de fitxers temporals
+        Remove-Item -Force $ZIP_PATH
+        Remove-Item -Recurse -Force "temp_instantclient"
+        Write-Host "-> Oracle Instant Client portable instal·lat localment amb èxit!" -ForegroundColor Green
+    } catch {
+        Write-Host "-> Avís: No s'ha pogut descarregar l'Instant Client automàticament. L'aplicació utilitzarà el fallback del mode Thin." -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "`n[INFO] S'ha detectat una carpeta 'instantclient' local. S'utilitzarà aquesta." -ForegroundColor Green
+}
 
 # 2. Compilar Frontend React
 Write-Host "`n[2/5] Compilant Frontend de React..." -ForegroundColor Yellow
@@ -87,9 +119,21 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
+# 4.1 Copiar Instant Client portable al costat de l'executable final (dist)
+if (Test-Path $INSTANT_CLIENT_DIR) {
+    Write-Host "`n[4.1/5] Integrant Instant Client portable al directori de distribució..." -ForegroundColor Yellow
+    if (Test-Path "dist\instantclient") { Remove-Item -Recurse -Force "dist\instantclient" }
+    Copy-Item -Path $INSTANT_CLIENT_DIR -Destination "dist\instantclient" -Recurse -Force
+    Write-Host "-> Carpeta 'instantclient' portable afegida amb èxit a dist\instantclient!" -ForegroundColor Green
+}
+
 # 5. Resultat final
 Write-Host "`n==========================================================" -ForegroundColor Green
-Write-Host "   EXECUTABLE GENERAT CORRECTAMENT A: dist\dashboard.exe   " -ForegroundColor Green
+Write-Host "   EXECUTABLE PORTABLE GENERAT CORRECTAMENT A: dist\       " -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green
-Write-Host "   Ara pots utilitzar l'aplicació portable amb un sol clic!" -ForegroundColor Green
+Write-Host "   Pots copiar la carpeta 'dist' sencer a qualsevol ordinador!" -ForegroundColor Green
+Write-Host "   Estructura portable generada:" -ForegroundColor Green
+Write-Host "   📂 dist\" -ForegroundColor Green
+Write-Host "     ├── 📄 dashboard.exe (L'executable)" -ForegroundColor Green
+Write-Host "     └── 📂 instantclient\ (Llibreries natives d'Oracle)" -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green
