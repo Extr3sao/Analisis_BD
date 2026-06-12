@@ -301,7 +301,7 @@ config/Cadena_conexions.txt
 Format:
 
 ```txt
-## E13DB
+## E13BD
 USER = usuari_oracle
 PASSWORD = contrasenya_oracle
 DSN = host:1521/servei
@@ -310,7 +310,7 @@ DSN = host:1521/servei
 Si vols definir quin perfil s'usa per defecte, crea o edita `config/.env`:
 
 ```env
-DEFAULT_PROFILE=E13DB
+DEFAULT_PROFILE=E13BD
 CONNECTIONS_FILE=config\Cadena_conexions.txt
 ORACLE_CLIENT_LIB_DIR=C:\oracle\instantclient
 ```
@@ -424,7 +424,7 @@ Smoke Oracle opt-in, des de `src/web-app`:
 
 ```powershell
 $env:ORACLE_SMOKE_CONNECTIONS_FILE='C:\\ruta\\Cadena_conexions.txt'
-$env:ORACLE_SMOKE_PROFILE='E13DB'
+$env:ORACLE_SMOKE_PROFILE='E13BD'
 $env:ORACLE_SMOKE_SCHEMA='APP_USER'
 $env:ORACLE_SMOKE_POST_CRQ_SCHEMAS='APP_USER,CORE_DB'   # opcional
 $env:ORACLE_SMOKE_INTERNAL_DB_SOURCE='data\\e13bd.db'   # opcional, per reutilitzar el cataleg real de lots
@@ -436,7 +436,7 @@ Exemple real validat amb proveidor:
 
 ```powershell
 $env:ORACLE_SMOKE_CONNECTIONS_FILE='config\\Cadena_conexions.txt'
-$env:ORACLE_SMOKE_PROFILE='E13DB'
+$env:ORACLE_SMOKE_PROFILE='E13BD'
 $env:ORACLE_SMOKE_SCHEMA='ABOIX'
 $env:ORACLE_SMOKE_POST_CRQ_SCHEMAS='E13_RALC'
 $env:ORACLE_SMOKE_INTERNAL_DB_SOURCE='data\\e13bd.db'
