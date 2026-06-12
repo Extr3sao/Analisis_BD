@@ -1108,13 +1108,11 @@ def validate_check_preview(data: CheckValidationRequest) -> Dict[str, Any]:
     validation["rows"] = full_rows[:preview_limit]
 
     if validation.get("status") != "ok":
-        error_msg = validation.get("error") or dbm.last_error or "Error de validació desconegut"
         return {
             "status": "error",
             "profile": selected_profile,
             "time_filter": normalized_filter,
             "validation": validation,
-            "error_detail": error_msg,
             "ai_preview": {"status": "skipped", "reason": "validation_failed"},
         }
 

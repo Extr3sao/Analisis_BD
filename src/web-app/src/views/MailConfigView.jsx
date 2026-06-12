@@ -236,9 +236,9 @@ export default function MailConfigView() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
         {/* BLOC SMTP */}
-        <div className="lg:col-span-5 xl:col-span-4 flex flex-col gap-8">
+        <div className="glass-card p-6 flex flex-col gap-6">
           <div className="flex items-center gap-3 border-b border-white/10 pb-4">
             <div className="p-2 rounded-lg bg-blue-500/10 text-blue-400">
               <Mail size={20} />
@@ -378,7 +378,7 @@ export default function MailConfigView() {
           </div>
         </div>
 
-        <div className="lg:col-span-7 xl:col-span-8 flex flex-col gap-8">
+        <div className="flex flex-col gap-8">
           <div className="glass-card p-6 flex flex-col gap-6">
             <div className="flex items-center gap-3 border-b border-white/10 pb-4">
               <div className="p-2 rounded-lg bg-amber-500/10 text-amber-300">
@@ -450,42 +450,41 @@ export default function MailConfigView() {
 
             <div className="flex flex-col gap-3">
               {(config.provider_routes || []).map((item, index) => (
-                <div key={`provider-route-${index}`} className="rounded-2xl border border-white/10 bg-white/5 p-4 hover:bg-white/10 transition-all">
-                  <div className="grid grid-cols-1 gap-4 items-center md:grid-cols-[120px_1fr_2fr_100px_50px]">
+                <div key={`provider-route-${index}`} className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_1.2fr_1.8fr_auto_auto]">
                     <input
                       value={item.provider_code}
                       onChange={e => updateProviderRoute(index, 'provider_code', e.target.value.toUpperCase())}
-                      className="min-w-0 rounded-xl border border-border bg-white/5 p-3 text-sm font-mono outline-none focus:ring-1 focus:ring-primary"
+                      className="rounded-xl border border-border bg-white/5 p-3 text-sm font-mono outline-none focus:ring-1 focus:ring-primary"
                       placeholder="LOT_APP"
                     />
                     <input
                       value={item.label}
                       onChange={e => updateProviderRoute(index, 'label', e.target.value)}
-                      className="min-w-0 rounded-xl border border-border bg-white/5 p-3 text-sm outline-none focus:ring-1 focus:ring-primary"
+                      className="rounded-xl border border-border bg-white/5 p-3 text-sm outline-none focus:ring-1 focus:ring-primary"
                       placeholder="Nom visible"
                     />
                     <input
                       value={item.emails_text}
                       onChange={e => updateProviderRoute(index, 'emails_text', e.target.value)}
-                      className="min-w-0 rounded-xl border border-border bg-white/5 p-3 text-sm outline-none focus:ring-1 focus:ring-primary"
+                      className="rounded-xl border border-border bg-white/5 p-3 text-sm outline-none focus:ring-1 focus:ring-primary"
                       placeholder="proveidor@exemple.com, suport@exemple.com"
                     />
-                    <label className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 h-full px-3 py-3 text-xs cursor-pointer hover:bg-white/20 transition-all select-none">
+                    <label className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm">
                       <input
                         type="checkbox"
                         checked={item.enabled}
                         onChange={e => updateProviderRoute(index, 'enabled', e.target.checked)}
-                        className="w-4 h-4 rounded border-white/20 bg-white/10 text-primary focus:ring-0"
                       />
-                      <span className="font-bold uppercase tracking-tighter">Actiu</span>
+                      Actiu
                     </label>
                     <button
                       type="button"
                       onClick={() => removeProviderRoute(index)}
-                      className="inline-flex items-center justify-center rounded-xl border border-red-500/20 bg-red-500/10 h-full w-full py-3 text-red-200 hover:bg-red-500/30 transition-all"
+                      className="inline-flex items-center justify-center rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-3 text-red-200 hover:bg-red-500/15"
                       aria-label={`Eliminar ruta ${item.provider_code || index + 1}`}
                     >
-                      <Trash2 size={18} />
+                      <Trash2 size={16} />
                     </button>
                   </div>
                 </div>

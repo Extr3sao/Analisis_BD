@@ -1,6 +1,5 @@
 import oracledb
 import os
-import sys
 import logging
 import re
 
@@ -12,36 +11,16 @@ class OracleDBManager:
         self._connect_failed = False
         self.logger = logging.getLogger(__name__)
         
-        # Cerca de directori d'Instant Client portable local al costat de l'executable o a l'arrel
-        exe_dir = os.path.dirname(sys.executable) if hasattr(sys, 'frozen') else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-        local_instant_client = os.path.join(exe_dir, "instantclient")
-        
         # Intentar inicialitzar mode Thick si es troba la ruta del client.
         lib_dir = (
             config.get("ORACLE_CLIENT_LIB_DIR")
             or os.getenv("ORACLE_CLIENT_LIB_DIR")
-            or (local_instant_client if os.path.exists(local_instant_client) else None)
             or os.getenv("OCI_LIB_DIR")
         )
-
         if lib_dir and os.path.exists(lib_dir):
             try:
                 # Assegurar ruta absoluta per evitar problemes amb caràcters especials
                 abs_lib_dir = os.path.abspath(lib_dir)
-                
-                # Resoldre problemes de caràcters especials (com la 'ò' a Windows) utilitzant el short path
-                if os.name == 'nt':
-                    import ctypes
-                    from ctypes import wintypes
-                    _GetShortPathNameW = ctypes.windll.kernel32.GetShortPathNameW
-                    _GetShortPathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
-                    _GetShortPathNameW.restype = wintypes.DWORD
-                    output_buf_size = _GetShortPathNameW(abs_lib_dir, None, 0)
-                    if output_buf_size > 0:
-                        output_buf = ctypes.create_unicode_buffer(output_buf_size)
-                        _GetShortPathNameW(abs_lib_dir, output_buf, output_buf_size)
-                        abs_lib_dir = output_buf.value
-
                 oracledb.init_oracle_client(lib_dir=abs_lib_dir)
                 self.logger.info(f"Oracle Thick Mode inicialitzat des de: {abs_lib_dir}")
             except Exception as e:
@@ -49,87 +28,38 @@ class OracleDBManager:
                 self.logger.error(f"Avís: No s'ha pogut inicialitzar el mode Thick ({type(e).__name__}: {e}). Es farà servir el mode Thin.")
 
     def connect(self):
-        """Estableix la connexió amb la base de dades amb fallback de Service Name a SID."""
+        """Estableix la connexió amb la base de dades."""
         if self._connect_failed:
-            # Si ja ha fallat en aquesta instància, no tornem a intentar-ho immediatament
-            # per evitar esperes innecessàries, a menys que hagin passat més de 5 segons.
-            pass
-
-        user = self.config.get("USER")
-        password = self.config.get("PASSWORD")
-        dsn_raw = self.config.get("DSN")
-
-        if not all([user, password, dsn_raw]):
-            self.last_error = "Falten paràmetres de connexió (USER, PASSWORD, DSN)."
             return False
 
-        # Intent 1: Connexió directa (tal com està al DSN)
         try:
-            self.connection = oracledb.connect(user=user, password=password, dsn=dsn_raw)
-            self._finalize_connection()
-            return True
-        except Exception as e_direct:
-            error_str = str(e_direct)
-            self.logger.warning(f"Intent de connexió directa fallit per {dsn_raw}: {error_str}")
+            user = self.config.get("USER")
+            password = self.config.get("PASSWORD")
+            dsn = self.config.get("DSN")
             
-            # Si l'error suggereix problemes de resolució del Service Name/SID, intentem el fallback
-            # ORA-12505: SID not found
-            # ORA-12514: TNS:listener does not currently know of service requested
-            if any(code in error_str for code in ["ORA-12505", "ORA-12514"]) or "/" in dsn_raw:
-                self.logger.info("Detectat possible error de Service Name/SID. Provant formats alternatius...")
+            if not all([user, password, dsn]):
+                raise ValueError("Falten paràmetres de connexió (USER, PASSWORD, DSN).")
                 
-                # Intentar descompondre host:port/db_name
+            self.connection = oracledb.connect(
+                user=user,
+                password=password,
+                dsn=dsn
+            )
+            timeout_ms = self.config.get("CALL_TIMEOUT_MS")
+            if timeout_ms:
                 try:
-                    # El regex gestiona host:port/name i també host:port:name
-                    match = re.match(r"^([^:/]+):(\d+)[/|:](.+)$", dsn_raw)
-                    if match:
-                        host, port, db_name = match.groups()
-                        
-                        # Intent 2: Forçar Service Name
-                        try:
-                            dsn_service = oracledb.makedsn(host, port, service_name=db_name)
-                            self.connection = oracledb.connect(user=user, password=password, dsn=dsn_service)
-                            self.logger.info(f"Connectat amb èxit a {host}:{port} via Service Name ({db_name}).")
-                            self._finalize_connection()
-                            return True
-                        except Exception as e_s:
-                            self.logger.debug(f"Service Name ha fallat per {db_name}: {e_s}")
-                            
-                            # Intent 3: Forçar SID
-                            try:
-                                dsn_sid = oracledb.makedsn(host, port, sid=db_name)
-                                self.connection = oracledb.connect(user=user, password=password, dsn=dsn_sid)
-                                self.logger.info(f"Connectat amb èxit a {host}:{port} via SID ({db_name}).")
-                                self._finalize_connection()
-                                return True
-                            except Exception as e_sid:
-                                self.last_error = f"Error en connectar (Service Name i SID han fallat). Últim error: {e_sid}"
-                    else:
-                        self.last_error = error_str
-                except Exception as e_parse:
-                    self.last_error = f"Error en analitzar el DSN: {e_parse}. Error original: {error_str}"
-            else:
-                self.last_error = error_str
-
+                    self.connection.call_timeout = int(timeout_ms)
+                except (AttributeError, TypeError, ValueError):
+                    self.logger.warning("No s'ha pogut aplicar CALL_TIMEOUT_MS=%s", timeout_ms)
+            self.last_error = None
+            self._connect_failed = False
+            self.logger.info("Connexió establerta correctament.")
+            return True
+        except (oracledb.Error, RuntimeError, ValueError) as e:
+            self.last_error = str(e)
             self._connect_failed = True
-            self.logger.error(f"Error en connectar a Oracle ({dsn_raw}): {self.last_error}")
+            self.logger.error(f"Error en connectar a Oracle: {e}")
             return False
-
-    def _finalize_connection(self):
-        """Configuracions post-connexió (timeouts, etc.)."""
-        if not self.connection:
-            return
-            
-        timeout_ms = self.config.get("CALL_TIMEOUT_MS")
-        if timeout_ms:
-            try:
-                self.connection.call_timeout = int(timeout_ms)
-            except (AttributeError, TypeError, ValueError):
-                self.logger.warning("No s'ha pogut aplicar CALL_TIMEOUT_MS=%s", timeout_ms)
-        
-        self.last_error = None
-        self._connect_failed = False
-        # self.logger.info("Connexió Oracle finalitzada correctament.")
 
     def execute_query(self, query, params=None):
         """Executa una consulta SQL i retorna els resultats i les capçaleres."""

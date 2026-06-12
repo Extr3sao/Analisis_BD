@@ -1,4 +1,4 @@
-# Dashboard E13BD
+﻿# Dashboard E13BD
 
 Portal intern per a auditoria Oracle, control post-CRQ i automatitzacions de distribucio d'informes.
 
@@ -199,70 +199,26 @@ Variables utiles:
 
 ## Arrencada
 
-### 🌟 Mètode Recomanat: Opció unificada amb script (`run.ps1`)
+### Opcio unificada
 
-La forma més ràpida, segura i recomanada d'iniciar el projecte en un ordinador nou (evitant qualsevol error de configuració manual o de rutes) és utilitzar l'script unificat `run.ps1`.
+`run.ps1`:
 
-**⚠️ Requisits previs indispensables al nou PC:**
-1. **Python (3.10+):** Durant la instal·lació a Windows, assegura't de marcar la casella **`Add python.exe to PATH`**.
-2. **Node.js (v18+):** És obligatori tenir Node instal·lat perquè l'script pugui compilar automàticament el frontend de React.
+1. crea `.venv` si no existeix
+2. installa dependencies Python
+3. entra a `src/web-app`
+4. installa dependencies Node si cal
+5. executa `npm run build`
+6. arrenca `uvicorn src.api.main:app --host 127.0.0.1 --port 8000`
 
-Aquest script s'encarrega de tot el procés automàticament:
-- Crear l'entorn virtual `.venv` si no existeix.
-- Instal·lar les dependències de Python des de `requirements.txt`.
-- Instal·lar les dependències de Node (`npm install`) i compilar el frontend (`npm run build`).
-- Iniciar el servidor FastAPI/Uvicorn correctament apuntant a `src.api.main:app`.
-
-Per executar-ho de forma segura saltant-se les restriccions d'execució de Windows, obre PowerShell a la carpeta del projecte i executa:
-```powershell
-powershell -ExecutionPolicy Bypass -File .\run.ps1
-```
-
-Si vols forçar una arrencada neta (alliberant ports vells i reinstal·lant de zero):
-```powershell
-powershell -ExecutionPolicy Bypass -File .\run-clean.ps1
-```
-
----
-
-### Arrencada manual pas a pas (Guia Detallada) 🚀
-
-Si prefereixes realitzar el procés manualment o estàs configurant un entorn de desenvolupament a mida, segueix aquests passos en ordre:
-
-1. **Verifica Python i Node:** Assegura't de tenir instal·lats Python (amb `Add python.exe to PATH`) i Node.js.
-2. **Obre la terminal (PowerShell):** Navega fins a la carpeta del projecte descarregat:
-   ```powershell
-   cd "C:\Ruta\a\la\teva\carpeta\del\projecte"
-   ```
-3. **Crea i configura l'entorn virtual de Python:**
-   ```powershell
-   python -m venv .venv
-   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-   ```
-4. **Compila el Frontend (React/Vite):**
-   ```powershell
-   cd src\web-app
-   npm install
-   npm run build
-   cd ..\..
-   ```
-5. **Inicia el Backend:**
-   ```powershell
-   .\.venv\Scripts\uvicorn.exe src.api.main:app --host 127.0.0.1 --port 8000
-   ```
-
----
-
-### Opció manual per a desenvolupament (Rutes relatives)
+### Opcio manual
 
 Backend:
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
+.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-uvicorn src.api.main:app --host 127.0.0.1 --port 8000 --reload
+uvicorn src.api.main:app --host 127.0.0.1 --port 8000
 ```
-
 
 Frontend en desenvolupament:
 

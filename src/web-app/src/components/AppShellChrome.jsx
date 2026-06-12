@@ -1,5 +1,5 @@
 import React from 'react';
-import { Settings, ShieldAlert, Network, BookOpen } from 'lucide-react';
+import { Settings, ShieldAlert, Network } from 'lucide-react';
 
 function SidebarItem({ icon: Icon, label, active, onClick }) {
   return (
@@ -86,18 +86,14 @@ export default function AppShellChrome({
           active={activeTab === 'Arquitectura'}
           onClick={() => onSelectMainTab('Arquitectura')}
         />
-        <SidebarItem
-          icon={Settings}
-          label="Configuració"
-          active={activeTab === 'Configuració'}
-          onClick={() => onSelectMainTab('Configuració')}
-        />
-        <SidebarItem
-          icon={BookOpen}
-          label="Manual de l'aplicació"
-          active={activeTab === 'Manual'}
-          onClick={() => onSelectMainTab('Manual')}
-        />
+        <button
+          disabled
+          className="nav-tab opacity-30 cursor-not-allowed"
+          title="Configuració deshabilitada"
+        >
+          <Settings size={16} />
+          <span>Configuració</span>
+        </button>
       </nav>
     </>
   );

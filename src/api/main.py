@@ -3,11 +3,14 @@ import sys
 import json
 import datetime
 import io
+import logging
+import os
 import csv
 import html
 import glob
 import re
 import shutil
+import copy
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Body, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -29,6 +32,7 @@ from src.analytics.queries_oracle import OracleQueries
 from src.analytics.scoring_engine import ScoringEngine
 from src.core.internal_db import InternalDBManager
 from src.core.sqlite_paths import resolve_sqlite_path
+from src.core.time_utils import utc_isoformat, utc_now
 from src.api.audit_engine import AuditEngine
 from src.api.automation_service import AutomationService, SEVERITY_OPTIONS, compute_next_run
 from src.api.post_crq_audit import (
@@ -48,6 +52,11 @@ from src.api.post_crq_delivery_reports import (
 from src.api.post_crq_lot_status import normalize_distribution_job_config
 from src.api.post_crq_experimental_pdf import build_post_crq_experimental_pdf, filter_post_crq_report_for_lot
 from src.api.post_crq_scheduler import classify_check_category, resolve_scheduler_config, timeout_for_category
+from src.api.post_crq_operational_docs import (
+    list_post_crq_operational_document_history,
+    list_post_crq_operational_documents,
+    update_post_crq_operational_document,
+)
 from src.api.master_lot_backfill import apply_master_lot_backfill, build_master_lot_backfill_preview
 from src.api.automation_analytics_pdf import build_automation_analytics_monthly_pdf
 from src.api.report_builder import (
@@ -55,9 +64,10 @@ from src.api.report_builder import (
     build_standard_pdf)
 from src.core.automation_store import AutomationStore
 from src.api.checks_admin_router import router as checks_admin_router
-from src.api.database_connections_router import router as database_connections_router
+
 
 SCHEMA_NAME_PATTERN = re.compile(r"^[A-Z][A-Z0-9_$#]*$")
+logger = logging.getLogger(__name__)
 
 # Managers globals
 config_loader = ConfigLoader()
@@ -77,14 +87,23 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Oracle Audit API", version="4.6", lifespan=lifespan)
-print("INFO: Starting Oracle Audit API v4.6 (Query Management Module Active)")
+logger.info("Starting Oracle Audit API v4.6 (Query Management Module Active)")
 app.include_router(checks_admin_router)
-app.include_router(database_connections_router)
 
 # Configurar CORS per permetre al frontend de React (Vite) connectar-se
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5174", "http://localhost:5175", "http://localhost:8000", "http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:8011"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
+        "http://localhost:8000",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+        "http://localhost:8011",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -106,6 +125,196 @@ app.add_middleware(FrameOptionsMiddleware)
 def _resolve_profile_key(profile_value: Optional[str], profiles: Dict) -> Optional[str]:
     requested = profile_value or config_loader.get_env_var("DEFAULT_PROFILE")
     return config_loader.resolve_profile_name(requested, profiles)
+
+
+def _report_timestamp_slug() -> str:
+    return utc_now().strftime("%Y%m%d_%H%M%S")
+
+
+def _stream_attachment(
+    content: bytes | str | io.BytesIO,
+    media_type: str,
+    filename: str,
+    *,
+    extra_headers: Optional[Dict[str, str]] | None = None,
+) -> StreamingResponse:
+    if isinstance(content, str):
+        payload = io.BytesIO(content.encode("utf-8"))
+    elif isinstance(content, bytes):
+        payload = io.BytesIO(content)
+    else:
+        payload = content
+    headers = {"Content-Disposition": f"attachment; filename={filename}"}
+    if extra_headers:
+        headers.update(extra_headers)
+    return StreamingResponse(
+        payload,
+        media_type=media_type,
+        headers=headers,
+    )
+
+
+def _raise_internal_http_error(stage: str, exc: Exception) -> None:
+    logger.exception("Error intern a %s", stage)
+    raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _run_with_internal_http_error(stage: str, operation):
+    try:
+        return operation()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _raise_internal_http_error(stage, exc)
+
+
+async def _run_with_oracle_profile(stage: str, profile_value: Optional[str], operation, *, require_profile: bool = True):
+    dbm = None
+    try:
+        profiles = config_loader.load_connections()
+        selected_profile = _resolve_profile_key(profile_value, profiles)
+        if require_profile and not selected_profile:
+            raise HTTPException(status_code=404, detail="Perfil no trobat")
+        if selected_profile and selected_profile in profiles:
+            dbm = OracleDBManager(profiles[selected_profile])
+        return await operation(selected_profile, dbm)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _raise_internal_http_error(stage, exc)
+    finally:
+        if dbm:
+            dbm.close()
+
+
+def _read_repo_text_file(filename: str, not_found_detail: str) -> Dict[str, str]:
+    doc_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", filename))
+    if not os.path.exists(doc_path):
+        raise HTTPException(status_code=404, detail=not_found_detail)
+    try:
+        with open(doc_path, "r", encoding="utf-8") as handle:
+            return {"content": handle.read()}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _raise_internal_http_error(f"read_repo_text_file:{filename}", exc)
+
+
+def _list_openrouter_models_or_fallback(client: OpenRouterClient) -> List[str]:
+    try:
+        models = client.list_models()
+        return sorted(
+            {
+                str(model.get("id") or "").strip()
+                for model in models
+                if client._is_free_model(model)
+            }
+        )
+    except (RuntimeError, ValueError, KeyError, TypeError) as exc:
+        logger.warning("No s'ha pogut obtenir la llista de models OpenRouter; s'usa el fallback", exc_info=exc)
+        return ["openrouter/free"]
+
+
+def _build_oracle_manager_or_none(profile_name: Optional[str], profiles: Dict[str, Any]) -> Optional[OracleDBManager]:
+    if not profile_name or profile_name not in profiles:
+        return None
+    try:
+        return OracleDBManager(profiles[profile_name])
+    except (RuntimeError, ValueError, TypeError, OSError) as exc:
+        logger.warning("No s'ha pogut connectar a Oracle %s", profile_name, exc_info=exc)
+        return None
+
+
+def _resolve_post_crq_report_payload(payload: Dict) -> tuple[str, Dict[str, Any], bool]:
+    report_data = payload.get("report_data")
+    if is_post_crq_audit_data(report_data) and (report_data.get("report_model") or report_data.get("results_by_check")):
+        cached_profile = (
+            (report_data.get("context") or {}).get("profile")
+            or ((report_data.get("report_model") or {}).get("execution_parameters") or {}).get("profile")
+        )
+        selected_profile = str(payload.get("profile") or cached_profile or "").strip()
+        if not selected_profile:
+            raise HTTPException(status_code=400, detail="Cal informar el perfil per generar el report Post-CRQ.")
+        return selected_profile, copy.deepcopy(report_data), True
+
+    profile = payload.get("profile")
+    profiles = config_loader.load_connections()
+    selected_profile = _resolve_profile_key(profile, profiles)
+    if not selected_profile:
+        raise HTTPException(status_code=404, detail="Perfil no trobat")
+
+    dbm = OracleDBManager(profiles[selected_profile])
+    try:
+        report = run_post_crq_audit(
+            db_manager=dbm,
+            selected_checks=payload.get("selected_checks") or [],
+            schemas=payload.get("schemas") or [],
+            time_filter=payload.get("time_filter") or {},
+            profile=selected_profile,
+            criticality_overrides=payload.get("criticality_overrides") or {},
+            scheduler_options=payload.get("scheduler_options") or {},
+        )
+    finally:
+        dbm.close()
+
+    return selected_profile, report, False
+
+
+def _normalize_post_crq_criticality_overrides(raw_overrides: Any) -> Dict[str, str]:
+    normalized: Dict[str, str] = {}
+    allowed = {"CRITIC", "MITJA", "BAIX"}
+    for key, value in (raw_overrides or {}).items():
+        check_id = str(key or "").strip().upper()
+        override = str(value or "").strip().upper()
+        if check_id and override in allowed:
+            normalized[check_id] = override
+    return normalized
+
+
+def _normalize_post_crq_scheduler_options(raw_options: Any) -> Dict[str, Any]:
+    source = raw_options or {}
+
+    def _as_int(name: str) -> Optional[int]:
+        value = source.get(name)
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"Valor no valid per {name}") from None
+
+    normalized: Dict[str, Any] = {}
+    for key in (
+        "max_concurrency",
+        "max_concurrency_upper_bound",
+        "max_heavy_concurrency",
+        "max_medium_concurrency",
+        "max_light_concurrency",
+        "max_retries",
+    ):
+        value = _as_int(key)
+        if value is not None:
+            normalized[key] = value
+    if "enable_auto_throttle" in source:
+        normalized["enable_auto_throttle"] = bool(source.get("enable_auto_throttle"))
+    return normalized
+
+
+def _normalize_post_crq_job_config(payload: Dict) -> Dict[str, Any]:
+    base_config = payload.get("job_config") or {}
+    return {
+        **base_config,
+        "criticality_overrides": _normalize_post_crq_criticality_overrides(
+            payload.get("criticality_overrides")
+            if "criticality_overrides" in payload
+            else base_config.get("criticality_overrides")
+        ),
+        "scheduler_options": _normalize_post_crq_scheduler_options(
+            payload.get("scheduler_options")
+            if "scheduler_options" in payload
+            else base_config.get("scheduler_options")
+        ),
+    }
 
 
 def _normalize_automation_job_payload(payload: Dict) -> Dict:
@@ -147,11 +356,16 @@ def _normalize_automation_job_payload(payload: Dict) -> Dict:
         raise HTTPException(status_code=400, detail="Format de report no valid")
     if audit_type == "post_crq_distribution":
         report_format = "pdf"
-        job_config = normalize_distribution_job_config(payload.get("job_config") or {})
+        job_config = {
+            **normalize_distribution_job_config(payload.get("job_config") or {}),
+            **_normalize_post_crq_job_config(payload),
+        }
         if job_config["lot_scope"]["mode"] == "selected" and not job_config["lot_scope"]["selected_lots"]:
             raise HTTPException(status_code=400, detail="Cal indicar almenys un lot quan l ambit es manual")
         if not job_config["report_options"]["include_summary"] and not job_config["report_options"]["include_lot_reports"]:
             raise HTTPException(status_code=400, detail="Cal generar almenys un tipus de report per al job")
+    elif audit_type == "post_crq":
+        job_config = _normalize_post_crq_job_config(payload)
     else:
         job_config = payload.get("job_config") or {}
 
@@ -176,11 +390,22 @@ def _normalize_automation_job_payload(payload: Dict) -> Dict:
 
 
 def _normalize_delivery_routes_payload(payload: Dict) -> Dict:
-    tic_summary_recipients = [
-        str(item).strip()
-        for item in (payload.get("tic_summary_recipients") or [])
-        if str(item).strip()
-    ]
+    tic_summary_recipients = []
+    for item in (payload.get("tic_summary_recipients") or []):
+        if isinstance(item, dict):
+            email = str(item.get("email") or "").strip()
+            if email:
+                tic_summary_recipients.append({
+                    "email": email,
+                    "enabled": bool(item.get("enabled", True))
+                })
+        else:
+            email = str(item or "").strip()
+            if email:
+                tic_summary_recipients.append({
+                    "email": email,
+                    "enabled": True
+                })
     providers = []
     for item in payload.get("providers") or []:
         provider_code = str(item.get("provider_code") or "").strip()
@@ -300,14 +525,13 @@ def _delete_report_artifacts(report_paths: List[str]) -> Dict[str, int]:
                 deleted_files += 1
             except OSError:
                 pass
-        if path.lower().endswith(".zip"):
-            artifacts_dir = f"{os.path.splitext(path)[0]}_artifacts"
-            if os.path.isdir(artifacts_dir):
-                try:
-                    shutil.rmtree(artifacts_dir)
-                    deleted_dirs += 1
-                except OSError:
-                    pass
+        artifacts_dir = f"{os.path.splitext(path)[0]}_artifacts"
+        if os.path.isdir(artifacts_dir):
+            try:
+                shutil.rmtree(artifacts_dir)
+                deleted_dirs += 1
+            except OSError:
+                pass
     return {
         "deleted_report_files": deleted_files,
         "deleted_report_dirs": deleted_dirs,
@@ -316,118 +540,105 @@ def _delete_report_artifacts(report_paths: List[str]) -> Dict[str, int]:
 @app.get("/api/profiles")
 async def get_profiles():
     """Retorna la llista de connexions Oracle configurades."""
-    try:
+    def operation():
         profiles = config_loader.load_connections()
         default = config_loader.get_env_var("DEFAULT_PROFILE")
         return {"profiles": list(profiles.keys()), "default": default}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("get_profiles", operation)
+
 
 @app.post("/api/audit")
 async def run_audit(schemas: List[str] = Body(...), profile: Optional[str] = None):
     """Executa l'auditoria transparent sobre els esquemes seleccionats."""
-    try:
-        profiles = config_loader.load_connections()
-        selected_profile = _resolve_profile_key(profile, profiles)
-
-        if not selected_profile:
-            raise HTTPException(status_code=404, detail="Perfil no trobat")
-
-        dbm = OracleDBManager(profiles[selected_profile])
+    async def operation(_selected_profile, dbm):
         query = OracleQueries.get_summary_query(schemas)
         data, cols = dbm.execute_query(query)
-        dbm.close()
-        
+
         if not data:
             return {"results": [], "summary": "No s'han trobat dades."}
-            
+
         # Aplicar Scoring
         df = pd.DataFrame(data, columns=cols)
         results = []
         for _, row in df.iterrows():
             results.append(row.to_dict() | scoring_engine.classify_schema(row))
-            
+
         return {"results": results, "count": len(results)}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return await _run_with_oracle_profile("run_audit", profile, operation)
 
 @app.get("/api/knowledge")
 async def get_knowledge(search: Optional[str] = None):
     """Cerca al repositori de coneixement intern."""
-    try:
+    def operation():
         queries = internal_db.get_queries()
         if search:
-            # Filtre simple per text
-            queries = [q for q in queries if search.lower() in q[1].lower() or search.lower() in q[2].lower()]
-            
+            needle = search.lower()
+            queries = [
+                q
+                for q in queries
+                if needle in str(q[1] or "").lower() or needle in str(q[2] or "").lower()
+            ]
+
         return [
             {"id": q[0], "sql": q[1], "explanation": q[2], "source": q[3], "date": q[4]}
             for q in queries
         ]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("get_knowledge", operation)
+
 
 @app.post("/api/ai/chat")
 async def ai_chat(query: str = Body(...), context: Optional[str] = Body(None), model: Optional[str] = Body(None)):
     """Interaccio amb l'assistent IA."""
-    try:
-        current_model = model or internal_db.get_app_setting("OPENROUTER_MODEL") or config_loader.get_env_var("AI_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
-        assistant = AIAssistant(model_name=current_model, internal_db=internal_db)
+    def operation():
+        current_model = model or config_loader.get_env_var("AI_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
+        assistant = AIAssistant(model_name=current_model)
         prompt = query if not context else f"Context addicional:\n{context}\n\nConsulta:\n{query}"
         response = assistant.generate_response(prompt)
         return {"response": response}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("ai_chat", operation)
+
 
 @app.post("/api/queries/save")
 async def save_query(sql: str = Body(...), tags: List[str] = Body([]), model: str = Body(None)):
     """Analitza amb IA i guarda una consulta a la BBDD interna."""
-    try:
-        current_model = model or internal_db.get_app_setting("OPENROUTER_MODEL") or config_loader.get_env_var("AI_MODEL", "google/gemini-2.0-flash-exp:free")
-        assistant = AIAssistant(model_name=current_model, internal_db=internal_db)
+    def operation():
+        current_model = model or config_loader.get_env_var("AI_MODEL", "google/gemini-2.0-flash-exp:free")
+        assistant = AIAssistant(model_name=current_model)
         explanation = assistant.generate_response(
             "Explica breument aquesta consulta SQL Oracle i detecta riscos principals en 2-3 frases.\n\n"
             f"{sql}"
         )
         internal_db.add_query(sql, explanation=explanation, source="USER", tags=tags)
         return {"status": "success", "explanation": explanation}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("save_query", operation)
+
 
 @app.get("/api/config")
 async def get_config():
-    """Retorna la configuració actual d'IA de forma dinàmica."""
+    """Retorna la configuracio actual d'IA de forma dinamica."""
     try:
-        settings = OpenRouterSettings.from_config(config_loader, internal_db=internal_db)
-        client = OpenRouterClient(settings=settings, config=config_loader)
-        try:
-            models = client.list_models()
-            final_list = sorted(
-                {
-                    str(model.get("id") or "").strip()
-                    for model in models
-                    if client._is_free_model(model)
-                }
-            )
-        except Exception:
-            final_list = ["google/gemini-2.0-flash-lite-preview-02-05:free", "openrouter/free"]
-
+        client = OpenRouterClient(settings=OpenRouterSettings.from_config(config_loader), config=config_loader)
+        final_list = _list_openrouter_models_or_fallback(client)
         selected_model, _ = client.select_model()
-        if not final_list:
-            final_list = ["google/gemini-2.0-flash-lite-preview-02-05:free", "openrouter/free"]
+        if "openrouter/free" not in final_list:
+            final_list.append("openrouter/free")
 
         return {
-            "current_model": settings.model or selected_model,
-            "available_models": final_list
+            "current_model": config_loader.get_env_var("OPENROUTER_MODEL") or config_loader.get_env_var("AI_MODEL") or selected_model,
+            "available_models": final_list,
         }
-    except Exception as e:
-        print(f"Error a get_config: {e}")
+    except (RuntimeError, ValueError, KeyError, TypeError) as exc:
+        logger.warning("Error a get_config; s'usa configuracio fallback", exc_info=exc)
         return {
-            "current_model": internal_db.get_app_setting("OPENROUTER_MODEL") or "google/gemini-2.0-flash-lite-preview-02-05:free",
-            "available_models": ["google/gemini-2.0-flash-lite-preview-02-05:free", "openrouter/free"]
+            "current_model": config_loader.get_env_var("OPENROUTER_MODEL") or config_loader.get_env_var("AI_MODEL") or "openrouter/free",
+            "available_models": ["openrouter/free"],
         }
+
 
 @app.post("/api/config/openrouter")
 async def update_openrouter_key(key: str = Body(..., embed=True)):
@@ -438,54 +649,10 @@ async def update_openrouter_key(key: str = Body(..., embed=True)):
         return {"status": "success"}
     raise HTTPException(status_code=500, detail="Error desant la clau")
 
-@app.get("/api/config/ai")
-async def get_ai_config():
-    """Retorna la configuració d'IA des de la BBDD interna o el .env."""
-    try:
-        api_key = internal_db.get_app_setting("OPENROUTER_API_KEY")
-        if not api_key:
-            api_key = config_loader.get_env_var("OPENROUTER_API_KEY", "")
-            
-        model = internal_db.get_app_setting("OPENROUTER_MODEL")
-        if not model:
-            model = config_loader.get_env_var("OPENROUTER_MODEL", "google/gemini-2.0-flash-lite-preview-02-05:free")
-            
-        enabled = internal_db.get_app_setting("AI_ENABLED", "1") == "1"
-        discover_free = internal_db.get_app_setting("AI_DISCOVER_FREE", "1") == "1"
-        
-        return {
-            "api_key": api_key,
-            "model": model,
-            "enabled": enabled,
-            "discover_free": discover_free
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/config/ai")
-async def save_ai_config(payload: Dict = Body(...)):
-    """Desa la configuració d'IA a la BBDD interna."""
-    try:
-        if "api_key" in payload:
-            internal_db.set_app_setting("OPENROUTER_API_KEY", payload["api_key"])
-        if "model" in payload:
-            internal_db.set_app_setting("OPENROUTER_MODEL", payload["model"])
-        if "enabled" in payload:
-            internal_db.set_app_setting("AI_ENABLED", "1" if payload["enabled"] else "0")
-        if "discover_free" in payload:
-            internal_db.set_app_setting("AI_DISCOVER_FREE", "1" if payload["discover_free"] else "0")
-            
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/api/config/openrouter")
 async def get_openrouter_key():
     """Retorna si hi ha una clau configurada (emmascarada)."""
-    key = internal_db.get_app_setting("OPENROUTER_API_KEY")
-    if not key:
-        key = config_loader.get_env_var("OPENROUTER_API_KEY", "")
-        
+    key = config_loader.get_env_var("OPENROUTER_API_KEY", "")
     if key:
         return {"configured": True, "masked": f"{key[:4]}...{key[-4:]}" if len(key) > 8 else "****"}
     return {"configured": False}
@@ -501,93 +668,82 @@ async def deep_scan_legacy(username: str, profile: Optional[str] = None):
     return await deep_scan_handler(username, profile)
 
 async def deep_scan_handler(username: str, profile: Optional[str]):
-    """Realitza una anÃ lisi profunda d'un o mÃ©s esquemes."""
+    """Realitza una analisi profunda d'un o mes esquemes."""
     import urllib.parse
     import re
-    
-    # Descodificar URL (per si el frontend envia %2C enlloc de ,)
+
     decoded_username = urllib.parse.unquote(username)
-    print(f"DEBUG: Bulk Deep Scan solÂ·licitat per: {decoded_username} (Perfil: {profile})")
-    
-    # Netejar cometes
+    logger.debug("Bulk Deep Scan sollicitat per %s (perfil=%s)", decoded_username, profile)
+
     cleaned = decoded_username.replace("'", "").replace('"', "")
-    
-    # Separar per coma, punt i coma, o espais, sent flexible
     raw_list = re.split(r'[;,\s]+', cleaned)
     clean_schemas = [s.strip().upper() for s in raw_list if s.strip()]
-    
+
     if not clean_schemas or (len(clean_schemas) == 1 and clean_schemas[0] == ""):
         clean_schemas = ["SYSTEM"]
 
     dbm = None
     profiles = config_loader.load_connections()
     selected_profile = _resolve_profile_key(profile, profiles)
-    
-    if selected_profile in profiles:
-        try:
-            dbm = OracleDBManager(profiles[selected_profile])
-        except Exception as e:
-            print(f"ERROR: No s'ha pogut connectar a Oracle {selected_profile}: {e}")
-            dbm = None
-            
+
+    dbm = _build_oracle_manager_or_none(selected_profile, profiles)
+
     engine = AuditEngine(dbm)
     all_results = []
-    
-    for schema in clean_schemas:
-        print(f"DEBUG: Processant esquema {schema}...")
-        try:
-            result = await engine.get_deep_schema_audit(schema)
-            all_results.append(result)
-        except Exception as e:
-            import traceback
-            print(f"ERROR: Error auditant {schema}: {e}")
-            traceback.print_exc()
-            all_results.append({
-                "username": schema,
-                "error": str(e),
-                "obsolescence_score": 0,
-                "summary": {"STATUS": "FAILED"}
-            })
-            
-    if dbm: dbm.close()
-    return all_results
+    try:
+        for schema in clean_schemas:
+            logger.debug("Processant esquema %s", schema)
+            try:
+                result = await engine.get_deep_schema_audit(schema)
+                all_results.append(result)
+            except (RuntimeError, ValueError, TypeError, OSError) as exc:
+                logger.exception("Error auditant l'esquema %s", schema)
+                all_results.append(
+                    {
+                        "username": schema,
+                        "error": str(exc),
+                        "obsolescence_score": 0,
+                        "summary": {"STATUS": "FAILED"},
+                    }
+                )
+        return all_results
+    finally:
+        if dbm:
+            dbm.close()
+
 
 @app.post("/api/audit/dashboard-stats")
 async def get_dashboard_stats(schemas: List[str] = Body(...), profile: Optional[str] = None):
-    """Genera estadÃ­stiques agregades per al dashboard visual."""
+    """Genera estadistiques agregades per al dashboard visual."""
     try:
         profiles = config_loader.load_connections()
         selected_profile = _resolve_profile_key(profile, profiles)
-        
-        dbm = None
-        if selected_profile in profiles:
-            dbm = OracleDBManager(profiles[selected_profile])
-            
+
+        dbm = _build_oracle_manager_or_none(selected_profile, profiles)
+
         engine = AuditEngine(dbm)
         all_results = []
-        
-        # Auditem tots els esquemes de la llista (perÃ² en format resum per velocitat si calguÃ©s, 
-        # tot i aixÃ­ usem el deep scan perquÃ¨ el frontend vol dades precises)
-        tasks = [engine.get_deep_schema_audit(s) for s in schemas]
-        import asyncio
-        all_results = await asyncio.gather(*tasks)
-        
-        if dbm: dbm.close()
-        
-        # AgregaciÃ³ de dades
+        try:
+            tasks = [engine.get_deep_schema_audit(s) for s in schemas]
+            import asyncio
+            all_results = await asyncio.gather(*tasks)
+        finally:
+            if dbm:
+                dbm.close()
+
         stats = {
             "total_gb": 0,
             "recovered_gb": 0,
-            "distribution": [0, 0, 0, 0, 0], # 0-20, 21-40, 61-80, 81-100
+            "distribution": [0, 0, 0, 0, 0],
             "status_counts": {"CRITIC": 0, "RISC": 0, "OK": 0},
             "apex_total": 0,
-            "top_candidates": []
+            "top_candidates": [],
         }
-        
+
         for res in all_results:
             score = res.get("obsolescence_score", 0)
             size = (res.get("summary") or {}).get("SIZE_GB") or 0
-            
+
             stats["total_gb"] += size
             if score > 70:
                 stats["recovered_gb"] += size
@@ -596,30 +752,27 @@ async def get_dashboard_stats(schemas: List[str] = Body(...), profile: Optional[
                 stats["status_counts"]["RISC"] += 1
             else:
                 stats["status_counts"]["OK"] += 1
-                
-            # DistribuciÃ³
+
             bin_idx = min(4, score // 20)
             stats["distribution"][bin_idx] += 1
-            
+
             if res.get("apex_apps"):
                 stats["apex_total"] += 1
-                
-            stats["top_candidates"].append({
-                "username": res["username"],
-                "score": score,
-                "size": size,
-                "priority": score * (size + 0.1) # Pesem per mida i nota
-            })
-            
-        # Ordenar top candidates
+
+            stats["top_candidates"].append(
+                {
+                    "username": res["username"],
+                    "score": score,
+                    "size": size,
+                    "priority": score * (size + 0.1),
+                }
+            )
+
         stats["top_candidates"].sort(key=lambda x: x["priority"], reverse=True)
         stats["top_candidates"] = stats["top_candidates"][:5]
-        
         return stats
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+    except (RuntimeError, ValueError, TypeError, OSError) as exc:
+        _raise_internal_http_error("get_dashboard_stats", exc)
 
 
 @app.get("/api/docs/technical-audit")
@@ -627,17 +780,7 @@ async def get_technical_audit_docs():
     """
     Retorna el contingut del fitxer AUDITORIA_BBDD_DOC.md en format text.
     """
-    try:
-        doc_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "AUDITORIA_BBDD_DOC.md"))
-        if not os.path.exists(doc_path):
-            raise HTTPException(status_code=404, detail="Fitxer de documentació no trobat")
-        
-        with open(doc_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        
-        return {"content": content}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _read_repo_text_file("AUDITORIA_BBDD_DOC.md", "Fitxer de documentaci? no trobat")
 
 
 @app.get("/api/docs/automation")
@@ -645,23 +788,56 @@ async def get_automation_docs():
     """
     Retorna el contingut del fitxer automatitzacions-ajuda.md en format text.
     """
-    try:
-        doc_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "automatitzacions-ajuda.md"))
-        if not os.path.exists(doc_path):
-            raise HTTPException(status_code=404, detail="Fitxer de documentació d'automatitzacions no trobat")
-        
-        with open(doc_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        
-        return {"content": content}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _read_repo_text_file("automatitzacions-ajuda.md", "Fitxer de documentaci? d'automatitzacions no trobat")
+
+
+@app.get("/api/docs/post-crq-operational")
+async def get_post_crq_operational_docs():
+    """Retorna els documents operatius editables associats al flux Post-CRQ."""
+    return _run_with_internal_http_error(
+        "get_post_crq_operational_docs",
+        list_post_crq_operational_documents,
+    )
+
+
+@app.put("/api/docs/post-crq-operational/{document_id}")
+async def update_post_crq_operational_docs(document_id: str, payload: Dict = Body(...)):
+    """Desa un document operatiu Post-CRQ controlant conflictes per versio."""
+
+    def operation():
+        content = payload.get("content")
+        expected_version = payload.get("expected_version")
+        force_overwrite = bool(payload.get("force_overwrite", False))
+        if not isinstance(content, str):
+            raise HTTPException(status_code=400, detail="El camp content ha de ser text")
+        if expected_version is not None and not isinstance(expected_version, str):
+            raise HTTPException(status_code=400, detail="El camp expected_version ha de ser text")
+        if "force_overwrite" in payload and not isinstance(payload.get("force_overwrite"), bool):
+            raise HTTPException(status_code=400, detail="El camp force_overwrite ha de ser boolea")
+        return update_post_crq_operational_document(
+            document_id,
+            content,
+            expected_version=expected_version,
+            force_overwrite=force_overwrite,
+        )
+
+    return _run_with_internal_http_error("update_post_crq_operational_docs", operation)
+
+
+@app.get("/api/docs/post-crq-operational/{document_id}/history")
+async def get_post_crq_operational_doc_history(document_id: str, limit: int = 10):
+    """Retorna l'historial recent de versions desades d'un document operatiu Post-CRQ."""
+
+    def operation():
+        return list_post_crq_operational_document_history(document_id, limit=limit)
+
+    return _run_with_internal_http_error("get_post_crq_operational_doc_history", operation)
 
 
 @app.get("/api/audit/post-crq/checks")
 async def list_post_crq_checks():
     """Llista els checks disponibles definits al markdown post-CRQ."""
-    try:
+    def operation():
         from src.api.post_crq_audit import resolve_post_crq_markdown_path
 
         path = resolve_post_crq_markdown_path()
@@ -683,15 +859,14 @@ async def list_post_crq_checks():
                 }
             )
         return {"checks": enriched_checks, "count": len(enriched_checks), "source_file": os.path.basename(path), "source_path": path}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("list_post_crq_checks", operation)
 
 
 @app.post("/api/audit/post-crq/run")
 async def run_post_crq(payload: Dict = Body(...)):
-    """Executa una auditoria tècnica post-CRQ basada en checks del markdown."""
-    dbm = None
-    try:
+    """Executa una auditoria tecnica post-CRQ basada en checks del markdown."""
+    async def operation(selected_profile, dbm):
         profile = payload.get("profile")
         schemas = payload.get("schemas") or []
         time_filter = payload.get("time_filter") or {}
@@ -699,12 +874,6 @@ async def run_post_crq(payload: Dict = Body(...)):
         criticality_overrides = payload.get("criticality_overrides") or {}
         scheduler_options = payload.get("scheduler_options") or {}
 
-        profiles = config_loader.load_connections()
-        selected_profile = _resolve_profile_key(profile, profiles)
-        if not selected_profile:
-            raise HTTPException(status_code=404, detail="Perfil no trobat")
-
-        dbm = OracleDBManager(profiles[selected_profile])
         report = run_post_crq_audit(
             db_manager=dbm,
             selected_checks=selected_checks,
@@ -715,14 +884,8 @@ async def run_post_crq(payload: Dict = Body(...)):
             scheduler_options=scheduler_options,
         )
         return report
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if dbm:
-            dbm.close()
 
+    return await _run_with_oracle_profile("run_post_crq", payload.get("profile"), operation)
 
 
 @app.post("/api/audit/post-crq/generate-by-lots")
@@ -730,22 +893,14 @@ async def generate_post_crq_by_lots(payload: Dict = Body(...)):
     """
     Executa l'auditoria Post-CRQ i retorna un ZIP amb el resum general i informes individuals per lot.
     """
-    dbm = None
-    try:
-        profile = payload.get("profile")
+    async def operation(selected_profile, dbm):
         schemas = payload.get("schemas") or []
         time_filter = payload.get("time_filter") or {}
         selected_checks = payload.get("selected_checks") or []
         criticality_overrides = payload.get("criticality_overrides") or {}
         scheduler_options = payload.get("scheduler_options") or {}
 
-        profiles = config_loader.load_connections()
-        selected_profile = _resolve_profile_key(profile, profiles)
-        if not selected_profile:
-            raise HTTPException(status_code=404, detail="Perfil no trobat")
-
         # 1. Executar l'auditoria una sola vegada (Model Global)
-        dbm = OracleDBManager(profiles[selected_profile])
         report = run_post_crq_audit(
             db_manager=dbm,
             selected_checks=selected_checks,
@@ -755,70 +910,53 @@ async def generate_post_crq_by_lots(payload: Dict = Body(...)):
             criticality_overrides=criticality_overrides,
             scheduler_options=scheduler_options,
         )
-        
+
         # 2. Generar el ZIP mitjançant la nova funció
         zip_bytes = build_post_crq_zip_bundle(selected_profile, report)
-        
-        filename = f"auditoria_lots_{selected_profile}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-        
-        return StreamingResponse(
-            io.BytesIO(zip_bytes),
-            media_type="application/zip",
-            headers={"Content-Disposition": f"attachment; filename={filename}"},
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if dbm:
-            dbm.close()
+
+        filename = f"auditoria_lots_{selected_profile}_{_report_timestamp_slug()}.zip"
+        return _stream_attachment(zip_bytes, "application/zip", filename)
+
+    return await _run_with_oracle_profile("download_post_crq_reports_zip", payload.get("profile"), operation)
 
 
 @app.post("/api/audit/post-crq/reports")
 async def generate_post_crq_reports(payload: Dict = Body(...)):
-    dbm = None
-    try:
-        profile = payload.get("profile")
-        schemas = payload.get("schemas") or []
-        time_filter = payload.get("time_filter") or {}
-        selected_checks = payload.get("selected_checks") or []
-        criticality_overrides = payload.get("criticality_overrides") or {}
-        scheduler_options = payload.get("scheduler_options") or {}
+    def operation():
         variant = (payload.get("variant") or "general").strip().lower()
+        summary_version = (payload.get("summary_version") or "v1").strip().lower()
         provider_code = (payload.get("provider_code") or "").strip()
 
         if variant not in {"general", "provider", "all"}:
             raise HTTPException(status_code=400, detail="El camp variant ha de ser 'general', 'provider' o 'all'.")
         if variant == "provider" and not provider_code:
             raise HTTPException(status_code=400, detail="Cal informar provider_code per generar el report per proveidor.")
+        if summary_version not in {"v1", "v2", "experimental"}:
+            raise HTTPException(status_code=400, detail="El camp summary_version ha de ser 'v1' o 'v2'.")
+        if variant != "general" and summary_version != "v1":
+            raise HTTPException(status_code=400, detail="La versió experimental només està disponible per al resum general.")
 
-        profiles = config_loader.load_connections()
-        selected_profile = _resolve_profile_key(profile, profiles)
-        if not selected_profile:
-            raise HTTPException(status_code=404, detail="Perfil no trobat")
+        selected_profile, report, _used_cached_report = _resolve_post_crq_report_payload(payload)
 
-        dbm = OracleDBManager(profiles[selected_profile])
-        report = run_post_crq_audit(
-            db_manager=dbm,
-            selected_checks=selected_checks,
-            schemas=schemas,
-            time_filter=time_filter,
-            profile=selected_profile,
-            criticality_overrides=criticality_overrides,
-            scheduler_options=scheduler_options,
-        )
-
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = _report_timestamp_slug()
         if variant == "general":
+            if summary_version in {"v2", "experimental"}:
+                pdf_bytes = build_post_crq_experimental_pdf(selected_profile, report)
+                filename = f"report_auditoria_post_crq_general_{selected_profile}_{timestamp}_v2.pdf"
+                return _stream_attachment(
+                    pdf_bytes,
+                    "application/pdf",
+                    filename,
+                    extra_headers={"X-Post-CRQ-Summary-Version": "v2"},
+                )
+
             artifact = build_post_crq_general_artifact(selected_profile, report)
             filename = f"report_auditoria_post_crq_general_{selected_profile}_{timestamp}.pdf"
-            return StreamingResponse(
-                io.BytesIO(artifact["content"]),
-                media_type="application/pdf",
-                headers={"Content-Disposition": f"attachment; filename={filename}"},
+            return _stream_attachment(
+                artifact["content"],
+                "application/pdf",
+                filename,
+                extra_headers={"X-Post-CRQ-Summary-Version": "v1"},
             )
 
         if variant == "provider":
@@ -828,52 +966,42 @@ async def generate_post_crq_reports(payload: Dict = Body(...)):
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             artifact_key = artifact["filename"].replace(".pdf", "")
             filename = f"report_auditoria_post_crq_provider_{selected_profile}_{artifact_key}_{timestamp}.pdf"
-            return StreamingResponse(
-                io.BytesIO(artifact["content"]),
-                media_type="application/pdf",
-                headers={"Content-Disposition": f"attachment; filename={filename}"},
+            return _stream_attachment(
+                artifact["content"],
+                "application/pdf",
+                filename,
+                extra_headers={"X-Post-CRQ-Summary-Version": "v1"},
             )
 
         zip_bytes = build_post_crq_zip_bundle(selected_profile, report)
         filename = f"auditoria_proveidors_{selected_profile}_{timestamp}.zip"
-        return StreamingResponse(
-            io.BytesIO(zip_bytes),
-            media_type="application/zip",
-            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        return _stream_attachment(
+            zip_bytes,
+            "application/zip",
+            filename,
+            extra_headers={"X-Post-CRQ-Summary-Version": "v1"},
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if dbm:
-            dbm.close()
+
+    return _run_with_internal_http_error("generate_post_crq_reports", operation)
 
 
 @app.get("/api/automation/jobs")
 async def list_automation_jobs():
-    try:
-        return {"items": automation_store.list_jobs()}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error("list_automation_jobs", lambda: {"items": automation_store.list_jobs()})
 
 
 @app.post("/api/automation/jobs")
 async def create_automation_job(payload: Dict = Body(...)):
-    try:
+    def operation():
         normalized = _normalize_automation_job_payload(payload)
         return automation_store.create_job(normalized)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("create_automation_job", operation)
 
 
 @app.put("/api/automation/jobs/{job_id}")
 async def update_automation_job(job_id: int, payload: Dict = Body(...)):
-    try:
+    def operation():
         current = automation_store.get_job(job_id)
         if not current:
             raise HTTPException(status_code=404, detail="Job no trobat")
@@ -882,59 +1010,51 @@ async def update_automation_job(job_id: int, payload: Dict = Body(...)):
         if not updated:
             raise HTTPException(status_code=404, detail="Job no trobat")
         return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("update_automation_job", operation)
 
 
 @app.delete("/api/automation/jobs/{job_id}")
 async def delete_automation_job(job_id: int):
-    try:
+    def operation():
         deleted = automation_store.delete_job(job_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="Job no trobat")
         return {"status": "success"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("delete_automation_job", operation)
 
 
 @app.post("/api/automation/jobs/{job_id}/run-now")
 async def run_automation_job_now(job_id: int):
-    try:
+    def operation():
         if not automation_store.get_job(job_id):
             raise HTTPException(status_code=404, detail="Job no trobat")
         started = automation_service.run_job(job_id, manual=True)
         if not started:
             raise HTTPException(status_code=409, detail="El job ja s'esta executant")
         return {"status": "started", "job_id": job_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("run_automation_job_now", operation)
 
 
 @app.get("/api/automation/runs")
 async def list_automation_runs(job_id: Optional[int] = None, limit: int = 100):
-    try:
-        return {"items": automation_store.list_runs(job_id=job_id, limit=limit)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error(
+        "list_automation_runs",
+        lambda: {"items": automation_store.list_runs(job_id=job_id, limit=limit)},
+    )
 
 
 @app.get("/api/automation/runs/{run_id}")
 async def get_automation_run(run_id: int):
-    try:
+    def operation():
         run = automation_store.get_run(run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Execucio no trobada")
         return run
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("get_automation_run", operation)
 
 
 @app.get("/api/automation/runs/{run_id}/lots")
@@ -945,7 +1065,7 @@ async def list_automation_run_lots(
     audience: Optional[str] = None,
     delivery_result: Optional[str] = None,
 ):
-    try:
+    def operation():
         run = automation_store.get_run(run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Execucio no trobada")
@@ -958,10 +1078,8 @@ async def list_automation_run_lots(
                 delivery_result=delivery_result,
             )
         }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("list_automation_run_lots", operation)
 
 
 @app.get("/api/automation/runs/{run_id}/lots/export.csv")
@@ -972,7 +1090,7 @@ async def export_automation_run_lots_csv(
     audience: Optional[str] = None,
     delivery_result: Optional[str] = None,
 ):
-    try:
+    def operation():
         run = automation_store.get_run(run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Execucio no trobada")
@@ -1020,15 +1138,9 @@ async def export_automation_run_lots_csv(
                 }
             )
         filename = f"automation_run_{run_id}_lots.csv"
-        return StreamingResponse(
-            io.BytesIO(buffer.getvalue().encode("utf-8")),
-            media_type="text/csv; charset=utf-8",
-            headers={"Content-Disposition": f"attachment; filename={filename}"},
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return _stream_attachment(buffer.getvalue(), "text/csv; charset=utf-8", filename)
+
+    return _run_with_internal_http_error("export_automation_run_lots_csv", operation)
 
 
 @app.get("/api/automation/runs/{run_id}/report")
@@ -1041,38 +1153,57 @@ async def download_automation_run_report(run_id: int):
     return FileResponse(run["report_path"], filename=os.path.basename(run["report_path"]))
 
 
+@app.get("/api/automation/runs/{run_id}/report-data")
+async def get_automation_run_report_data(run_id: int):
+    def operation():
+        run = automation_store.get_run(run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Execucio no trobada")
+        if str(run.get("audit_type") or "").strip().lower() not in {"post_crq", "post_crq_distribution"}:
+            raise HTTPException(status_code=400, detail="Nomes disponible per execucions Post-CRQ")
+        report_path = str(run.get("report_path") or "").strip()
+        if not report_path:
+            raise HTTPException(status_code=404, detail="No hi ha snapshot disponible per aquesta execucio")
+        artifacts_dir = f"{os.path.splitext(report_path)[0]}_artifacts"
+        report_data_path = os.path.join(artifacts_dir, "report_data.json")
+        if not os.path.exists(report_data_path):
+            raise HTTPException(status_code=404, detail="Snapshot report_data no disponible")
+        with open(report_data_path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    return _run_with_internal_http_error("get_automation_run_report_data", operation)
+
+
 @app.get("/api/automation/tasks")
 async def list_automation_tasks(status: Optional[str] = None, limit: int = 200):
-    try:
-        return {"items": automation_store.list_tasks(status=status, limit=limit)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error(
+        "list_automation_tasks",
+        lambda: {"items": automation_store.list_tasks(status=status, limit=limit)},
+    )
 
 
 @app.put("/api/automation/tasks/{task_id}")
 async def update_automation_task(task_id: int, payload: Dict = Body(...)):
-    try:
+    def operation():
         updated = automation_store.update_task(task_id, payload)
         if not updated:
             raise HTTPException(status_code=404, detail="Tasca no trobada")
         return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("update_automation_task", operation)
 
 
 @app.get("/api/automation/severity-rules")
 async def list_automation_rules(scope: Optional[str] = None, job_id: Optional[int] = None):
-    try:
-        return {"items": automation_store.list_severity_rules(scope=scope, job_id=job_id)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error(
+        "list_automation_rules",
+        lambda: {"items": automation_store.list_severity_rules(scope=scope, job_id=job_id)},
+    )
 
 
 @app.post("/api/automation/severity-rules")
 async def create_automation_rule(payload: Dict = Body(...)):
-    try:
+    def operation():
         severity = (payload.get("severity") or "").strip().upper()
         if severity not in SEVERITY_OPTIONS:
             raise HTTPException(status_code=400, detail="Severitat no valida")
@@ -1090,15 +1221,13 @@ async def create_automation_rule(payload: Dict = Body(...)):
                 "enabled": bool(payload.get("enabled", True)),
             }
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("create_automation_rule", operation)
 
 
 @app.put("/api/automation/severity-rules/{rule_id}")
 async def update_automation_rule(rule_id: int, payload: Dict = Body(...)):
-    try:
+    def operation():
         if "severity" in payload:
             severity = (payload.get("severity") or "").strip().upper()
             if severity not in SEVERITY_OPTIONS:
@@ -1108,39 +1237,31 @@ async def update_automation_rule(rule_id: int, payload: Dict = Body(...)):
         if not updated:
             raise HTTPException(status_code=404, detail="Regla no trobada")
         return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("update_automation_rule", operation)
 
 
 @app.get("/api/automation/delivery-config")
 async def get_automation_delivery_config():
-    try:
-        return automation_store.get_delivery_config()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error("get_automation_delivery_config", automation_store.get_delivery_config)
 
 
 @app.put("/api/automation/delivery-config")
 async def update_automation_delivery_config(payload: Dict = Body(...)):
-    try:
-        return automation_store.update_delivery_config(payload)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error(
+        "update_automation_delivery_config",
+        lambda: automation_store.update_delivery_config(payload),
+    )
 
 
 @app.get("/api/automation/delivery-routes")
 async def get_automation_delivery_routes():
-    try:
-        return automation_store.get_delivery_routes()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error("get_automation_delivery_routes", automation_store.get_delivery_routes)
 
 
 @app.put("/api/automation/delivery-routes")
 async def update_automation_delivery_routes(payload: Dict = Body(...)):
-    try:
+    def operation():
         normalized = _normalize_delivery_routes_payload(payload or {})
         change_context = _change_context_from_payload(payload or {})
         before = automation_store.get_delivery_routes()
@@ -1157,31 +1278,29 @@ async def update_automation_delivery_routes(payload: Dict = Body(...)):
                 context={"source": "api"},
             )
         return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("update_automation_delivery_routes", operation)
 
 
 @app.get("/api/automation/master-lots")
 async def list_automation_master_lots(enabled_only: bool = False):
-    try:
-        return {"items": automation_store.list_master_lots(enabled_only=enabled_only)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error(
+        "list_automation_master_lots",
+        lambda: {"items": automation_store.list_master_lots(enabled_only=enabled_only)},
+    )
 
 
 @app.get("/api/automation/schema-lots")
 async def list_automation_schema_lots():
-    try:
-        return {"items": internal_db.list_schema_lots()}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error(
+        "list_automation_schema_lots",
+        lambda: {"items": internal_db.list_schema_lots()},
+    )
 
 
 @app.put("/api/automation/schema-lots")
 async def update_automation_schema_lots(payload: Dict = Body(...)):
-    try:
+    def operation():
         normalized = _normalize_schema_lots_payload(payload or {})
         change_context = _change_context_from_payload(payload or {})
         before = internal_db.list_schema_lots()
@@ -1198,16 +1317,14 @@ async def update_automation_schema_lots(payload: Dict = Body(...)):
                 context={"source": "api"},
             )
         return {"items": updated}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("update_automation_schema_lots", operation)
 
 
 
 @app.put("/api/automation/master-lots")
 async def update_automation_master_lots(payload: Dict = Body(...)):
-    try:
+    def operation():
         normalized = _normalize_master_lots_payload(payload or {})
         change_context = _change_context_from_payload(payload or {})
         return {
@@ -1218,36 +1335,34 @@ async def update_automation_master_lots(payload: Dict = Body(...)):
                 context={"source": "api"},
             )
         }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("update_automation_master_lots", operation)
 
 
 @app.get("/api/automation/master-lots/backfill-runs")
 async def list_automation_master_lot_backfill_runs(limit: int = 20):
-    try:
-        return {"items": automation_store.list_master_lot_backfill_runs(limit=limit)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error(
+        "list_automation_master_lot_backfill_runs",
+        lambda: {"items": automation_store.list_master_lot_backfill_runs(limit=limit)},
+    )
 
 
 @app.get("/api/automation/master-lots/backfill-preview")
 async def preview_automation_master_lot_backfill(actor: Optional[str] = None, reason: Optional[str] = None):
-    try:
+    def operation():
         preview = build_master_lot_backfill_preview(
             automation_store,
             actor=(actor or "").strip() or None,
             reason=(reason or "").strip() or None,
         )
         return preview
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("preview_automation_master_lot_backfill", operation)
 
 
 @app.post("/api/automation/master-lots/backfill-apply")
 async def apply_automation_master_lot_backfill(payload: Dict = Body(...)):
-    try:
+    def operation():
         run_id = int(payload.get("run_id"))
         selected = [
             str(item).strip().upper()
@@ -1263,23 +1378,21 @@ async def apply_automation_master_lot_backfill(payload: Dict = Body(...)):
             actor=actor,
             reason=reason,
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("apply_automation_master_lot_backfill", operation)
 
 
 @app.get("/api/automation/lot-routes")
 async def list_automation_lot_routes(audience: Optional[str] = None):
-    try:
-        return {"items": automation_store.list_lot_routes(audience=audience)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error(
+        "list_automation_lot_routes",
+        lambda: {"items": automation_store.list_lot_routes(audience=audience)},
+    )
 
 
 @app.put("/api/automation/lot-routes")
 async def update_automation_lot_routes(payload: Dict = Body(...)):
-    try:
+    def operation():
         normalized = _normalize_lot_routes_payload(payload or {})
         change_context = _change_context_from_payload(payload or {})
         updated = automation_store.upsert_lot_routes(
@@ -1303,23 +1416,21 @@ async def update_automation_lot_routes(payload: Dict = Body(...)):
             }
             automation_store.update_delivery_routes(provider_payload)
         return {"items": updated}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("update_automation_lot_routes", operation)
 
 
 @app.get("/api/automation/delivery-templates")
 async def list_automation_delivery_templates(audience: Optional[str] = None):
-    try:
-        return {"items": automation_store.list_delivery_templates(audience=audience)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error(
+        "list_automation_delivery_templates",
+        lambda: {"items": automation_store.list_delivery_templates(audience=audience)},
+    )
 
 
 @app.put("/api/automation/delivery-templates")
 async def update_automation_delivery_templates(payload: Dict = Body(...)):
-    try:
+    def operation():
         normalized = _normalize_delivery_templates_payload(payload or {})
         change_context = _change_context_from_payload(payload or {})
         return {
@@ -1330,24 +1441,22 @@ async def update_automation_delivery_templates(payload: Dict = Body(...)):
                 context={"source": "api"},
             )
         }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("update_automation_delivery_templates", operation)
 
 
 @app.get("/api/automation/change-events")
 async def list_automation_change_events(entity_type: Optional[str] = None, entity_key: Optional[str] = None, limit: int = 100):
-    try:
-        return {
+    return _run_with_internal_http_error(
+        "list_automation_change_events",
+        lambda: {
             "items": automation_store.list_change_events(
                 entity_type=entity_type,
                 entity_key=entity_key,
                 limit=limit,
             )
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        },
+    )
 
 
 @app.get("/api/automation/delivery-attempts")
@@ -1358,8 +1467,9 @@ async def list_automation_delivery_attempts(
     status: Optional[str] = None,
     limit: int = 200,
 ):
-    try:
-        return {
+    return _run_with_internal_http_error(
+        "list_automation_delivery_attempts",
+        lambda: {
             "items": automation_store.list_delivery_attempts(
                 run_id=run_id,
                 lot=lot,
@@ -1367,9 +1477,8 @@ async def list_automation_delivery_attempts(
                 status=status,
                 limit=limit,
             )
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        },
+    )
 
 
 @app.get("/api/automation/retry-queue")
@@ -1381,8 +1490,9 @@ async def list_automation_retry_queue(
     due_only: bool = False,
     limit: int = 200,
 ):
-    try:
-        return {
+    return _run_with_internal_http_error(
+        "list_automation_retry_queue",
+        lambda: {
             "items": automation_store.list_retry_queue(
                 status=status,
                 run_id=run_id,
@@ -1391,55 +1501,54 @@ async def list_automation_retry_queue(
                 due_only=due_only,
                 limit=limit,
             )
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        },
+    )
 
 
 @app.get("/api/automation/maintenance/summary")
 async def get_automation_maintenance_summary(retain_days: int = 30):
-    try:
-        return automation_store.get_maintenance_summary(retain_days=retain_days)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error(
+        "get_automation_maintenance_summary",
+        lambda: automation_store.get_maintenance_summary(retain_days=retain_days),
+    )
 
 
 @app.get("/api/automation/analytics/overview")
 async def get_automation_analytics_overview(month: Optional[str] = None):
-    try:
-        return automation_store.get_post_crq_analytics_overview(month=month)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error(
+        "get_automation_analytics_overview",
+        lambda: automation_store.get_post_crq_analytics_overview(month=month),
+    )
 
 
 @app.get("/api/automation/analytics/lots")
 async def list_automation_analytics_lots(month: Optional[str] = None, limit: int = 100):
-    try:
-        return {"items": automation_store.list_post_crq_lot_analytics(month=month, limit=limit)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error(
+        "list_automation_analytics_lots",
+        lambda: {"items": automation_store.list_post_crq_lot_analytics(month=month, limit=limit)},
+    )
 
 
 @app.get("/api/automation/analytics/schemas")
 async def list_automation_analytics_schemas(month: Optional[str] = None, limit: int = 100):
-    try:
-        return {"items": automation_store.list_post_crq_schema_analytics(month=month, limit=limit)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error(
+        "list_automation_analytics_schemas",
+        lambda: {"items": automation_store.list_post_crq_schema_analytics(month=month, limit=limit)},
+    )
 
 
 @app.get("/api/automation/analytics/checks")
 async def list_automation_analytics_checks(month: Optional[str] = None, limit: int = 100):
-    try:
-        return {"items": automation_store.list_post_crq_check_analytics(month=month, limit=limit)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error(
+        "list_automation_analytics_checks",
+        lambda: {"items": automation_store.list_post_crq_check_analytics(month=month, limit=limit)},
+    )
 
 
 @app.get("/api/automation/analytics/monthly-report.pdf")
 async def download_automation_analytics_monthly_pdf(month: Optional[str] = None, limit: int = 100):
-    try:
-        current_month = month or datetime.datetime.now().strftime("%Y-%m")
+    def operation():
+        current_month = month or utc_now().strftime("%Y-%m")
         overview = automation_store.get_post_crq_analytics_overview(month=current_month)
         lots = automation_store.list_post_crq_lot_analytics(month=current_month, limit=limit)
         schemas = automation_store.list_post_crq_schema_analytics(month=current_month, limit=limit)
@@ -1452,18 +1561,14 @@ async def download_automation_analytics_monthly_pdf(month: Optional[str] = None,
             checks=checks,
         )
         filename = f"dashboard_automatitzacions_{current_month}.pdf"
-        return StreamingResponse(
-            io.BytesIO(pdf_bytes),
-            media_type="application/pdf",
-            headers={"Content-Disposition": f"attachment; filename={filename}"},
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return _stream_attachment(pdf_bytes, "application/pdf", filename)
+
+    return _run_with_internal_http_error("download_automation_analytics_monthly_pdf", operation)
 
 
 @app.post("/api/automation/maintenance/purge-history")
 async def purge_automation_history(payload: Dict = Body(...)):
-    try:
+    def operation():
         retain_days = int(payload.get("retain_days") or 30)
         delete_reports = bool(payload.get("delete_reports", True))
         result = automation_store.purge_history(retain_days=retain_days)
@@ -1474,56 +1579,50 @@ async def purge_automation_history(payload: Dict = Body(...)):
             **result,
             **deleted_artifacts,
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("purge_automation_history", operation)
 
 
 @app.post("/api/automation/maintenance/purge-retry-queue")
 async def purge_automation_retry_queue(payload: Dict = Body(...)):
-    try:
+    def operation():
         statuses = payload.get("statuses") or []
         return automation_store.purge_retry_queue(statuses=statuses)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("purge_automation_retry_queue", operation)
 
 
 @app.post("/api/automation/retry-queue")
 async def enqueue_automation_retry(payload: Dict = Body(...)):
-    try:
+    def operation():
         run_id = int(payload.get("run_id"))
         audience = str(payload.get("audience") or "provider").strip().lower()
         lot = payload.get("lot")
         requested_by = str(payload.get("requested_by") or "manual").strip() or "manual"
         return automation_service.enqueue_manual_retry(run_id=run_id, lot=lot, audience=audience, requested_by=requested_by)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("enqueue_automation_retry", operation)
 
 
 @app.post("/api/automation/retry-queue/{queue_id}/run-now")
 async def run_automation_retry_now(queue_id: int):
-    try:
-        return automation_service.process_retry_queue_item(queue_id)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return _run_with_internal_http_error(
+        "run_automation_retry_now",
+        lambda: automation_service.process_retry_queue_item(queue_id),
+    )
 
 
 @app.post("/api/automation/delivery-config/test-email")
 async def test_automation_email(payload: Dict = Body(...)):
-    try:
+    def operation():
         recipient = (payload.get("recipient") or "").strip()
         if not recipient:
             raise HTTPException(status_code=400, detail="Cal indicar un destinatari")
         if payload:
             automation_store.update_delivery_config(payload)
         return automation_service.send_test_email(recipient)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("test_automation_email", operation)
 
 
 @app.post("/api/audit/plan-execution")
@@ -1533,19 +1632,12 @@ async def run_plan_execution(
     export: bool = Body(False),
 ):
     """Executa el pla complet Q01-Q19 i opcionalment exporta resultats a resources/."""
-    dbm = None
-    try:
-        profiles = config_loader.load_connections()
-        selected_profile = _resolve_profile_key(profile, profiles)
-
-        if selected_profile in profiles:
-            dbm = OracleDBManager(profiles[selected_profile])
-
+    async def operation(selected_profile, dbm):
         engine = AuditEngine(dbm)
         report = await engine.run_plan_audit(schemas)
 
         if export:
-            stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            stamp = _report_timestamp_slug()
             os.makedirs("resources", exist_ok=True)
             json_path = os.path.join("resources", f"audit_plan_{stamp}.json")
             csv_path = os.path.join("resources", f"audit_plan_summary_{stamp}.csv")
@@ -1571,45 +1663,34 @@ async def run_plan_execution(
             report["exports"] = {"json": json_path, "csv": csv_path}
 
         return report
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if dbm:
-            dbm.close()
+
+    return await _run_with_oracle_profile("run_plan_execution", profile, operation, require_profile=False)
+
 
 @app.post("/api/queries/execute")
 async def execute_query(sql: str = Body(..., embed=True), profile: Optional[str] = Body(None, embed=True)):
     """Executa una consulta SQL i retorna els resultats en format apte per a taules."""
-    try:
-        profiles = config_loader.load_connections()
-        selected_profile = _resolve_profile_key(profile, profiles)
-        
-        if not selected_profile:
-            raise HTTPException(status_code=404, detail="Perfil no trobat")
-            
-        dbm = OracleDBManager(profiles[selected_profile])
+    async def operation(_selected_profile, dbm):
         data, cols = dbm.execute_query(sql)
-        dbm.close()
-        
+
         if data is None:
-            raise HTTPException(status_code=400, detail="Error en l'execuciÃ³ de la consulta")
-            
-        # Convertim a llista de dicts per facilitar el consum al frontend de React/Table
+            raise HTTPException(status_code=400, detail="Error en l'execucio de la consulta")
+
         results = [dict(zip(cols, row)) for row in data]
         return {"results": results, "columns": cols}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return await _run_with_oracle_profile("execute_query", profile, operation)
+
 
 @app.post("/api/db/test")
 async def test_db(
-    user: Optional[str] = Body(None), 
-    password: Optional[str] = Body(None), 
+    user: Optional[str] = Body(None),
+    password: Optional[str] = Body(None),
     dsn: Optional[str] = Body(None),
     profile: Optional[str] = Body(None)
 ):
-    """Prova una connexiÃ³ Oracle (per dades manuals o perfil existent)."""
+    """Prova una connexio Oracle (per dades manuals o perfil existent)."""
+    dbm = None
     try:
         if profile:
             params = config_loader.get_profile(profile)
@@ -1619,18 +1700,22 @@ async def test_db(
         else:
             params = {"USER": user, "PASSWORD": password, "DSN": dsn}
             resolved_profile = None
-            
+
         dbm = OracleDBManager(params)
         data, _ = dbm.execute_query("SELECT 'OK' FROM DUAL")
-        dbm.close()
-        
+
         if data and data[0][0] == 'OK':
             if resolved_profile:
                 return {"status": "success", "message": f"Connexio perfil {resolved_profile} OK"}
             return {"status": "success", "message": "Connexio OK"}
         return {"status": "error", "message": "Resposta inesperada de la BBDD"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    except (RuntimeError, ValueError, TypeError, OSError) as exc:
+        logger.warning("Error provant la connexio Oracle", exc_info=exc)
+        return {"status": "error", "message": str(exc)}
+    finally:
+        if dbm:
+            dbm.close()
+
 
 @app.post("/api/db/add")
 async def add_db(name: str = Body(...), user: str = Body(...), password: str = Body(...), dsn: str = Body(...)):
@@ -1642,80 +1727,33 @@ async def add_db(name: str = Body(...), user: str = Body(...), password: str = B
 @app.post("/api/queries/import")
 async def import_queries(text: str = Body(...), model: Optional[str] = Body(None)):
     """Importa consultes des de text (format .txt), les analitza amb IA i les desa."""
-    try:
-        current_model = model or internal_db.get_app_setting("OPENROUTER_MODEL") or config_loader.get_env_var("AI_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
-        assistant = AIAssistant(model_name=current_model, internal_db=internal_db)
-        
-        # Divideix el text per punts i comes o salts de lÃ­nia dobles per agafar consultes individuals
+    def operation():
+        current_model = model or config_loader.get_env_var("AI_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
+        assistant = AIAssistant(model_name=current_model)
+
         raw_queries = [q.strip() for q in text.split(";") if q.strip()]
         imported_count = 0
-        
+
         for sql in raw_queries:
-            if len(sql) < 10: continue
-            
-            # Demanem a la IA una explicaciÃ³ de MÃ€XIM 2 lÃ­nies
-            prompt = f"Explica aquesta consulta SQL en MÃ€XIM 2 lÃ­nies de text, de forma molt concisa:\n{sql}"
+            if len(sql) < 10:
+                continue
+
+            prompt = f"Explica aquesta consulta SQL en MAXIM 2 linies de text, de forma molt concisa:\n{sql}"
             explanation = assistant.generate_response(prompt)
-            
-            # Netegem l'explicaciÃ³ per assegurar que no excedeixi les 2 lÃ­nies si la IA s'allarga
+
             explanation_lines = explanation.strip().split("\n")[:2]
             final_explanation = " ".join(explanation_lines)
-            
+
             internal_db.add_query(sql, explanation=final_explanation, source="IMPORT_TXT", tags=["IMPORTAT"])
             imported_count += 1
-            
-        return {"status": "success", "count": imported_count}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-def _to_float(value, default=0.0):
-    try:
-        if value is None:
-            return default
-        return float(value)
-    except Exception:
-        return default
+        return {"status": "success", "count": imported_count}
+
+    return _run_with_internal_http_error("import_queries", operation)
 
 
 def _is_post_crq_data(data: Any) -> bool:
     return isinstance(data, dict) and data.get("audit_type") == "post_crq"
-
-
-def _normalize_report_rows(data: Any) -> List[Dict]:
-    """Universal normalizer for report data (standard audit lists)."""
-    if not isinstance(data, list):
-        return []
-    
-    # For deep audit data, we return empty list here as it's handled separately in generate_report
-    if _is_deep_audit_data(data):
-        return []
-        
-    rows = []
-    for item in data or []:
-        if not isinstance(item, dict):
-            continue
-        # Map fields if they come from the frontend simple rows
-        if "schema" in item:
-            rows.append({
-                "schema": item.get("schema"),
-                "decision": item.get("decision", "PRECAUCIO"),
-                "score": int(_to_float(item.get("score"), 0)),
-                "size_gb": _to_float(item.get("size_gb"), 0.0),
-                "inbound_refs": int(_to_float(item.get("inbound_refs"), 0)),
-                "active_jobs": int(_to_float(item.get("active_jobs"), 0)),
-                "apex_apps": int(_to_float(item.get("apex_apps"), 0)),
-                "enabled_triggers": int(_to_float(item.get("enabled_triggers"), 0)),
-                "reason": item.get("reason", "-")
-            })
-    return rows
-
-
-def _recommendation(decision: str) -> str:
-    if decision == "NO ELIMINAR":
-        return "Mantenir en servei. Revisar impacte transversal i canvis controlats."
-    if decision == "PRECAUCIO":
-        return "Validar amb equip funcional i planificar finestra tÃ¨cnica."
-    return "Candidat de baixa. Preparar checklist pre-drop i backup."
 
 
 QUERY_EXPLANATIONS = {
@@ -1858,7 +1896,7 @@ def _to_float(value, default: float = 0.0) -> float:
             return float(value)
         s = str(value).replace("%", "").strip()
         return float(s)
-    except:
+    except (TypeError, ValueError):
         return default
 
 
@@ -1872,44 +1910,64 @@ def _recommendation(decision: str) -> str:
 
 
 def _normalize_report_rows(data: List[Dict]) -> List[Dict]:
-    """Converteix format deep audit o resultats raw en llista plana per al report resum."""
+    """Converteix format frontend, deep audit o resultats raw en llista plana per al report resum."""
     if not isinstance(data, list):
         data = [data]
-        
+
     rows = []
     for item in data:
         if not isinstance(item, dict):
             continue
-            
-        if "USERNAME" in item and "SIZE_GB" in item:
-            rows.append({
-                "schema": item.get("USERNAME", "N/A"),
-                "decision": item.get("DECISIO") or item.get("decisio") or "N/A",
-                "risk": item.get("RISC") or item.get("risc") or "N/A",
-                "score": _to_float(item.get("SCORE") or item.get("score")),
-                "size_gb": _to_float(item.get("SIZE_GB")),
-                "blockers": item.get("RAO") or item.get("rao") or "",
-                "inbound_refs": int(_to_float(item.get("INBOUND_REFERENCES"))),
-                "active_jobs": int(_to_float(item.get("ACTIVE_JOBS"))),
-                "apex_apps": int(_to_float(item.get("APEX_APPLICATIONS"))),
-                "enabled_triggers": int(_to_float(item.get("ENABLED_TRIGGERS"))),
-                "reason": item.get("RAO") or ""
-            })
+
+        if "schema" in item:
+            rows.append(
+                {
+                    "schema": item.get("schema", "N/A"),
+                    "decision": item.get("decision", "PRECAUCIO"),
+                    "risk": item.get("risk") or "N/A",
+                    "score": _to_float(item.get("score")),
+                    "size_gb": _to_float(item.get("size_gb")),
+                    "blockers": item.get("blockers") or "",
+                    "inbound_refs": int(_to_float(item.get("inbound_refs"))),
+                    "active_jobs": int(_to_float(item.get("active_jobs"))),
+                    "apex_apps": int(_to_float(item.get("apex_apps"))),
+                    "enabled_triggers": int(_to_float(item.get("enabled_triggers"))),
+                    "reason": item.get("reason") or "",
+                }
+            )
+        elif "USERNAME" in item and "SIZE_GB" in item:
+            rows.append(
+                {
+                    "schema": item.get("USERNAME", "N/A"),
+                    "decision": item.get("DECISIO") or item.get("decisio") or "N/A",
+                    "risk": item.get("RISC") or item.get("risc") or "N/A",
+                    "score": _to_float(item.get("SCORE") or item.get("score")),
+                    "size_gb": _to_float(item.get("SIZE_GB")),
+                    "blockers": item.get("RAO") or item.get("rao") or "",
+                    "inbound_refs": int(_to_float(item.get("INBOUND_REFERENCES"))),
+                    "active_jobs": int(_to_float(item.get("ACTIVE_JOBS"))),
+                    "apex_apps": int(_to_float(item.get("APEX_APPLICATIONS"))),
+                    "enabled_triggers": int(_to_float(item.get("ENABLED_TRIGGERS"))),
+                    "reason": item.get("RAO") or "",
+                }
+            )
         elif "username" in item or "summary" in item:
             sumry = item.get("summary") or {}
-            rows.append({
-                "schema": item.get("username", "N/A"),
-                "decision": item.get("audit_result", "N/A"),
-                "risk": "N/A",
-                "score": _to_float(item.get("obsolescence_score")),
-                "size_gb": _to_float(sumry.get("SIZE_GB")),
-                "blockers": f"Jobs:{sumry.get('ACTIVE_JOBS', 0)}, APEX:{sumry.get('APEX_APPLICATIONS', 0)}",
-                "inbound_refs": int(_to_float(sumry.get("INBOUND_REFERENCES"))),
-                "active_jobs": int(_to_float(sumry.get("ACTIVE_JOBS"))),
-                "apex_apps": int(_to_float(sumry.get("APEX_APPLICATIONS"))),
-                "enabled_triggers": int(_to_float(sumry.get("ENABLED_TRIGGERS"))),
-                "reason": str(item.get("audit_result", ""))
-            })
+            rows.append(
+                {
+                    "schema": item.get("username", "N/A"),
+                    "decision": item.get("audit_result", "N/A"),
+                    "risk": "N/A",
+                    "score": _to_float(item.get("obsolescence_score")),
+                    "size_gb": _to_float(sumry.get("SIZE_GB")),
+                    "blockers": f"Jobs:{sumry.get('ACTIVE_JOBS', 0)}, APEX:{sumry.get('APEX_APPLICATIONS', 0)}",
+                    "inbound_refs": int(_to_float(sumry.get("INBOUND_REFERENCES"))),
+                    "active_jobs": int(_to_float(sumry.get("ACTIVE_JOBS"))),
+                    "apex_apps": int(_to_float(sumry.get("APEX_APPLICATIONS"))),
+                    "enabled_triggers": int(_to_float(sumry.get("ENABLED_TRIGGERS"))),
+                    "reason": str(item.get("audit_result", "")),
+                }
+            )
     return rows
 
 
@@ -1994,7 +2052,7 @@ def _deep_query_payload(schema_item: Dict, query_id: str) -> List[Dict]:
     return []
 
 def _build_deep_markdown_report(profile: str, data: List[Dict]) -> str:
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
     total_gb = sum(_to_float((item.get("summary") or {}).get("SIZE_GB"), 0) for item in data)
     avg_score = round(sum(int(_to_float(item.get("obsolescence_score"))) for item in data) / len(data), 2) if data else 0
 
@@ -2028,7 +2086,7 @@ def _build_deep_markdown_report(profile: str, data: List[Dict]) -> str:
         jobs = int(_to_float(summary.get('ACTIVE_JOBS'), 0))
         apex = int(_to_float(summary.get('APEX_APPLICATIONS'), 0))
         trigs = int(_to_float(summary.get('ENABLED_TRIGGERS'), 0))
-        
+
         if score >= 100 and (in_deps + jobs + apex + trigs) == 0 and decision == "PRECAUCIO":
             decision = "ELIMINAR"
 
@@ -2090,248 +2148,47 @@ def _build_deep_markdown_report(profile: str, data: List[Dict]) -> str:
     return "\n".join(md)
 
 def _get_api_insights(profile: str, data: List[Dict]) -> str:
-    """Demana a Gemini un resum executiu coherent i orientat a gestors."""
+    """Genera un resum executiu utilitzant IA (Gemini)."""
     try:
         from src.core.ai_assistant import AIAssistant
-        assistant = AIAssistant(internal_db=internal_db)
+        assistant = AIAssistant()
 
         schema_lines = []
-        for d in data[:20]:
-            s = d.get('username') or (d.get('summary') or {}).get('USERNAME') or 'N/A'
-            score = int(_to_float(d.get('obsolescence_score')))
-            dec = d.get('audit_result', 'PRECAUCIO')
-            sumry = d.get('summary') or {}
-            in_deps = int(_to_float(sumry.get('INBOUND_REFERENCES')))
-            jobs    = int(_to_float(sumry.get('ACTIVE_JOBS')))
-            apex    = int(_to_float(sumry.get('APEX_APPLICATIONS')))
-            trigs   = int(_to_float(sumry.get('ENABLED_TRIGGERS')))
-            mida    = _to_float(sumry.get('SIZE_GB'))
+        for item in data:
+            s = item.get("username") or (item.get("summary") or {}).get("USERNAME") or "N/A"
+            sum_data = item.get("summary") or {}
+            dec = item.get("audit_result", "PRECAUCIO")
+            score = int(_to_float(item.get("obsolescence_score")))
+            mida = _to_float(sum_data.get("SIZE_GB"))
+            in_deps = int(_to_float(sum_data.get("INBOUND_REFERENCES")))
+            jobs = int(_to_float(sum_data.get("ACTIVE_JOBS")))
+            apex = int(_to_float(sum_data.get("APEX_APPLICATIONS")))
+            trigs = int(_to_float(sum_data.get("ENABLED_TRIGGERS")))
 
-            # Aplicar la mateixa regla de negoci que al PDF
-            if score >= 100 and (in_deps + jobs + apex + trigs) == 0 and dec == 'PRECAUCIO':
-                dec = 'ELIMINAR'
+            if score >= 100 and (in_deps + jobs + apex + trigs) == 0 and dec == "PRECAUCIO":
+                dec = "ELIMINAR"
 
             schema_lines.append(
-                f"- Esquema: {s} | Score: {score}% | DecisiÃ³: {dec} | "
+                f"- Esquema: {s} | Score: {score}% | Decisio: {dec} | "
                 f"Mida: {mida:.2f} GB | Deps.entrants: {in_deps} | "
                 f"Jobs: {jobs} | APEX: {apex} | Triggers: {trigs}"
             )
 
         total_schemas = len(data)
-        prompt = f"""Ets un DBA Oracle SÃ¨nior i Consultor EstratÃ¨gic d'Infraestructures de Dades. Has d'elaborar un Informe Executiu d'Auditoria de Base de Dades per al perfil '{profile}' que serÃ  llegit per CIO, CTO i Responsables d'Infraestructura. No et dirigeixes a tÃ¨cnics. El teu lector pren decisions de pressupost, risc i estrategia.
-
-REGLES ABSOLUTES:
-1. La decisiÃ³ de cada esquema que apareix a les dades (ELIMINAR / PRECAUCIO / NO ELIMINAR) Ã©s la decisiÃ³ oficial auditada. El teu text HA de ser 100% coherent amb ella. Si un esquema tÃ© DecisiÃ³=ELIMINAR, mai no pots dir que "requereix anÃ lisi addicional" ni que "es podria mantenir".
-2. Cap acrÃ²nim tÃ¨cnic sense explicaciÃ³ al costat (DDL, DML, APEX... han d'anar acompanyats d'una breu explicaciÃ³ entre parÃ¨ntesis si Ã©s el primer Ãºs).
-3. No repeteixis les mides o percentatges en mÃ©s d'una secciÃ³. Interpreta'ls, no copiar.
-4. Usa **negreta** per destacar conclusions crÃ­tiques i *cursiva* per a termes tÃ¨cnics.
-5. Emet una Ãºnica recomanaciÃ³ final clara. Sense dubitacions.
-
-ESTRUCTURA OBLIGATÃ’RIA (respecta emojis i tÃ­tols exactes):
-
-## ðŸ“Š Resum Executiu
-Un parÃ graf executiu que resumeixi l'estat general del perfil, proporciÃ³ d'esquemes a eliminar vs mantenir, risc global i oportunitat d'estalvi o neteja. Sense mÃ¨triques literals, interpreta'ls.
-
-## ðŸ”Ž InterpretaciÃ³ de l'Esquema
-Explica quÃ¨ Ã©s cadascun dels esquemes rellevants, si estan actius, si representen risc ocult o dependencia crÃ­tica. Usa llista de viÃ±etes per esquema.
-
-## ðŸ“ˆ AnÃ lisi TÃ¨cnica Detallada
-Avalua l'impacte de cada bloc de consultes (activitat, dependÃ¨ncies, seguretat, jobs). No descriuÃ©s les consultes, avalua el seu impacte per al negoci.
-
-## ðŸ— AvaluaciÃ³ ArquitectÃ²nica
-Determina si cada esquema Ã©s crÃ­tic per al negoci, candidat a consolidaciÃ³ o deute tÃ¨cnic acumulat.
-
-## âš ï¸ Matriu de Risc
-Lliura una taula en format Markdown amb columnes: DimensiÃ³ | Nivell | JustificaciÃ³
-Files: Operatiu, Seguretat, Arquitectura, ContinuÃ¯tat, ObsolescÃ¨ncia.
-
-## ðŸŽ¯ RecomanaciÃ³ EstratÃ¨gica Final
-DecisiÃ³ clara i justificada: Mantenir / Revisar / Refactoritzar / Desmantellar / Arxivar. Inclou horitzÃ³ temporal suggerit i risc de no actuar.
-
+        prompt = f"""Ets un DBA Oracle Senior i Consultor Estrategic per al perfil '{profile}'.
 DADES D'ENTRADA ({total_schemas} esquemes):
 {chr(10).join(schema_lines)}
 """
         return assistant.generate_response(prompt)
-    except Exception as e:
-        print(f"Error generant insights des de Gemini: {e}")
-        return "Resum executiu detallat i anÃ lisi predictiva no disponible en aquest moment."
+    except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+        logger.warning("Error generant insights", exc_info=exc)
+        return "IA no disponible."
 
-def _build_deep_pdf_report(profile: str, data: List[Dict]) -> bytes:
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    total_gb = sum(_to_float((item.get("summary") or {}).get("SIZE_GB"), 0) for item in data)
-    avg_score = round(sum(int(_to_float(item.get("obsolescence_score"))) for item in data) / len(data), 2) if data else 0
-
-    ai_insights = _get_api_insights(profile, data)
-    ai_insights_html = _md_to_html(ai_insights)
-
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-    <meta charset="utf-8">
-    <style>
-        @page {{
-            size: A4 portrait;
-            margin: 1.5cm;
-            @frame header {{
-                -pdf-frame-content: header_content;
-                top: 0.8cm;
-                margin-left: 1.5cm;
-                margin-right: 1.5cm;
-                height: 1.5cm;
-            }}
-            @frame footer {{
-                -pdf-frame-content: footer_content;
-                bottom: 0.8cm;
-                margin-left: 1.5cm;
-                margin-right: 1.5cm;
-                height: 1cm;
-            }}
-        }}
-        body {{ font-family: Helvetica, sans-serif; color: #333333; font-size: 9pt; line-height: 1.4; }}
-        h1 {{ color: #0A4FB3; font-size: 20pt; margin-bottom: 5px; border-bottom: 2px solid #0A4FB3; padding-bottom: 5px; }}
-        h2 {{ color: #1f2937; font-size: 14pt; margin-top: 20px; border-bottom: 1px solid #e5e7eb; padding-bottom: 5px; }}
-        h3 {{ color: #374151; font-size: 11pt; margin-top: 15px; margin-bottom: 5px; }}
-        .header {{ font-size: 9pt; font-weight: bold; border-bottom: 1px solid #0A4FB3; padding-bottom: 5px; color: #0A4FB3; text-align: right; }}
-        .footer {{ font-size: 8pt; color: #666666; border-top: 1px solid #e5e7eb; padding-top: 5px; text-align: right; }}
-        .summary-box {{ background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 12px; margin: 15px 0; }}
-        .insights-box {{ background-color: #f8fafc; border: 1px solid #e2e8f0; border-left: 3px solid #64748b; padding: 12px; margin: 10px 0; font-style: normal; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; margin-bottom: 15px; font-size: 8pt; table-layout: fixed; word-wrap: break-word; }}
-        th {{ background-color: #1f2937; color: white; border: 1px solid #374151; padding: 6px; text-align: left; font-weight: bold; overflow-wrap: anywhere; word-break: break-all; }}
-        td {{ border: 1px solid #e5e7eb; padding: 5px; vertical-align: top; overflow-wrap: anywhere; word-break: break-all; }}
-        tr:nth-child(even) {{ background-color: #f9fafb; }}
-        .kpi-table th {{ background-color: #0A4FB3; text-align: center; }}
-        .kpi-table td {{ text-align: center; font-weight: bold; font-size: 9pt; }}
-        .bar-container {{ width: 100%; background-color: #e5e7eb; border-radius: 4px; height: 12px; display: block; margin-top: 3px; }}
-        .bar-fill {{ background-color: #2563eb; height: 12px; border-radius: 4px; display: block; }}
-        .decision-badge {{ padding: 3px 6px; border-radius: 4px; color: white; font-weight: bold; font-size: 8pt; display: inline; }}
-        .bg-red {{ background-color: #ef4444; }}
-        .bg-orange {{ background-color: #f97316; }}
-        .bg-green {{ background-color: #22c55e; }}
-        .schema-title {{ font-size: 16pt; color: #0A4FB3; margin-top: 30px; page-break-before: always; border-bottom: 1px solid #0A4FB3; padding-bottom: 5px; }}
-        #toc a {{ color: #0A4FB3; text-decoration: none; display: block; margin-bottom: 4px; border-bottom: 1px dotted #ccc; padding-bottom: 2px; }}
-        .metrics-grid {{ width: 100%; border: none; }}
-        .metrics-grid td {{ border: none; padding: 2px; }}
-    </style>
-    </head>
-    <body>
-    <div id="header_content"><div class="header">Oracle Deep Scan Report - Perfil: {profile} | Generat: {now}</div></div>
-    <div id="footer_content"><div class="footer">PÃ gina <pdf:pagenumber> de <pdf:pagecount></div></div>
-    
-    <h1>Taula de Continguts</h1>
-    <div id="toc" style="margin-left: 15px; margin-top: 20px;">
-        <a href="#ResumExecutiu">1. Resum Executiu (IA Insights)</a>
-        <a href="#KpiGlobals">2. KPI Globals d'ObsolescÃ¨ncia</a>
-        <br/>
-        <strong>3. Detall AnalÃ­tic d'Esquemes:</strong><br/>
-    """
-
-    for idx, item in enumerate(data):
-        schema = item.get("username") or (item.get("summary") or {}).get("USERNAME") or "N/A"
-        html_content += f'<a href="#schema_{idx}">&nbsp;&nbsp;3.{idx + 1} Esquema: {schema}</a>'
-        
-    html_content += f"""
-    </div>
-    
-    <pdf:nextpage />
-    <h2 id="ResumExecutiu">1. Resum Executiu</h2>
-    <div class="insights-box">
-        {ai_insights_html}
-    </div>
-    
-    <h2 id="KpiGlobals">2. KPI Globals d'ObsolescÃ¨ncia</h2>
-    <div class="summary-box">
-        <strong>Perfil Actiu:</strong> {profile} | <strong>Pla:</strong> Q01..Q19 | <strong>Esquemes analitzats:</strong> {len(data)}<br/><br/>
-        <strong>Mida total analitzada:</strong> {total_gb:.2f} GB | <strong>Score mitjÃ  de deteriorament:</strong> {avg_score}%
-    </div>
-    <h3>Objectiu de l'Auditoria:</h3>
-    <p>Determinar una decisiÃ³ de neteja segura amb evidÃ¨ncia reproduÃ¯ble sobre OracleDB, integrant avaluacions de context mÃºltiple: Jobs Actius, DependÃ¨ncies (Out/In), etc.</p>
-    """
-
-    for idx, item in enumerate(data):
-        schema = item.get("username") or (item.get("summary") or {}).get("USERNAME") or "N/A"
-        summary = item.get("summary") or {}
-        decision = item.get("audit_result", "PRECAUCIO")
-        score = int(_to_float(item.get("obsolescence_score")))
-        
-        in_deps = int(_to_float(summary.get("INBOUND_REFERENCES")))
-        jobs = int(_to_float(summary.get("ACTIVE_JOBS")))
-        apex = int(_to_float(summary.get("APEX_APPLICATIONS")))
-        trigs = int(_to_float(summary.get("ENABLED_TRIGGERS")))
-        invalids = len(item.get("invalid_objects") or [])
-
-        if score >= 100 and (in_deps + jobs + apex + trigs) == 0 and decision == "PRECAUCIO":
-            decision = "ELIMINAR"
-        
-        bg_class = "bg-red" if decision == "ELIMINAR" else "bg-green" if decision == "NO ELIMINAR" else "bg-orange"
-        score_bg = "bg-red" if score >= 70 else "bg-orange" if score >= 40 else "bg-green"
-        
-        max_bar = max(1, in_deps, jobs, apex, trigs, invalids)
-        
-        html_content += f"""
-        <div class="schema-title" id="schema_{idx}">Detall: Esquema {schema}</div>
-        
-        <table class="kpi-table">
-            <tr>
-                <th>DecisiÃ³</th><th>Score</th><th>Mida (GB)</th><th>Deps Entrants</th>
-                <th>Jobs</th><th>APEX</th><th>Triggers</th>
-            </tr>
-            <tr>
-                <td><span class="decision-badge {bg_class}">{decision}</span></td>
-                <td><span class="decision-badge {score_bg}">{score}%</span></td>
-                <td>{_to_float(summary.get('SIZE_GB', 0)):.2f}</td>
-                <td>{in_deps}</td>
-                <td>{jobs}</td>
-                <td>{apex}</td>
-                <td>{trigs}</td>
-            </tr>
-        </table>
-        
-        <h3>Gràfic d'Impacte i Bloquejadors:</h3>
-        <table class="metrics-grid">
-            <tr><td><strong>Deps In:</strong></td><td>{in_deps}</td></tr>
-            <tr><td><strong>Jobs:</strong></td><td>{jobs}</td></tr>
-            <tr><td><strong>APEX:</strong></td><td>{apex}</td></tr>
-            <tr><td><strong>Triggers:</strong></td><td>{trigs}</td></tr>
-            <tr><td><strong>Invalids:</strong></td><td>{invalids}</td></tr>
-        </table>
-        
-        <h3>Traçabilitat Modular (Q01..Q19)</h3>
-        <table>
-            <tr><th width="25%">Consulta</th><th width="15%">Files</th><th width="60%">Evidència i Validació</th></tr>
-        """
-        for q in item.get("executed_queries") or []:
-            qid = q.get("query", "N/A")
-            html_content += f"""
-            <tr>
-                <td>{qid}</td>
-                <td align="center">{q.get("rows", 0)}</td>
-                <td>{_safe_html_text(QUERY_EXPLANATIONS.get(qid, "-"))}</td>
-            </tr>
-            """
-        html_content += "</table>"
-        
-        html_content += "<h3>Mètriques Detallades</h3>"
-        for q in item.get("executed_queries") or []:
-            qid = q.get("query", "N/A")
-            rows_data = _deep_query_payload(item, qid)
-            if rows_data:
-                html_content += f"<p><strong>Resultat de <code>{qid}</code></strong> &mdash; ({len(rows_data)} files)</p>"
-                html_content += _rows_to_html_table(rows_data, max_rows=5, max_cols=6) + "<br/>"
-
-    html_content += "</body></html>"
-    
-    buffer = io.BytesIO()
-    pisa_status = pisa.CreatePDF(io.StringIO(html_content), dest=buffer)
-    if pisa_status.err:
-        print("Error generant PDF (Deep Scan) amb xhtml2pdf:", pisa_status.err)
-    buffer.seek(0)
-    return buffer.getvalue()
 
 @app.post("/api/report/generate")
 async def generate_report(payload: Dict = Body(...)):
     """Genera un report professional en format markdown o pdf."""
-    try:
+    def operation():
         data = payload.get("data", [])
         profile = payload.get("profile", "default")
         fmt = payload.get("format", "markdown")
@@ -2340,30 +2197,22 @@ async def generate_report(payload: Dict = Body(...)):
         if _is_deep_audit_data(data) or _is_post_crq_data(data) or rows:
             # IA deshabilitada per defecte, es pot activar des del payload
             ai_active = payload.get("ai_active", False)
-            
+
             # Post-CRQ Case
             if _is_post_crq_data(data):
                 if fmt == "pdf":
                     try:
                         pdf_bytes = build_post_crq_pdf_report(profile, data)
-                    except Exception as exc:
+                    except (RuntimeError, ValueError, TypeError, OSError) as exc:
                         raise HTTPException(
                             status_code=500,
                             detail=f"report_generation_stage=classic_post_crq_pdf; {exc}",
                         ) from exc
-                    filename = f"report_auditoria_post_crq_{profile}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                    return StreamingResponse(
-                        io.BytesIO(pdf_bytes),
-                        media_type="application/pdf",
-                        headers={"Content-Disposition": f"attachment; filename={filename}"},
-                    )
+                    filename = f"report_auditoria_post_crq_{profile}_{_report_timestamp_slug()}.pdf"
+                    return _stream_attachment(pdf_bytes, "application/pdf", filename)
                 report_content = build_post_crq_markdown_report(profile, data)
-                filename = f"report_auditoria_post_crq_{profile}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-                return StreamingResponse(
-                    io.BytesIO(report_content.encode("utf-8")),
-                    media_type="text/markdown; charset=utf-8",
-                    headers={"Content-Disposition": f"attachment; filename={filename}"},
-                )
+                filename = f"report_auditoria_post_crq_{profile}_{_report_timestamp_slug()}.md"
+                return _stream_attachment(report_content, "text/markdown; charset=utf-8", filename)
 
             # Deep Scan / Obsolets Case
             if _is_deep_audit_data(data):
@@ -2371,14 +2220,14 @@ async def generate_report(payload: Dict = Body(...)):
             else:
                 report_data = [
                     {
-                        "username": r["schema"], 
-                        "audit_result": r["decision"], 
+                        "username": r["schema"],
+                        "audit_result": r["decision"],
                         "obsolescence_score": r["score"],
                         "summary": {
-                            "SIZE_GB": r["size_gb"], 
-                            "INBOUND_REFERENCES": r["inbound_refs"], 
-                            "ACTIVE_JOBS": r["active_jobs"], 
-                            "APEX_APPLICATIONS": r["apex_apps"], 
+                            "SIZE_GB": r["size_gb"],
+                            "INBOUND_REFERENCES": r["inbound_refs"],
+                            "ACTIVE_JOBS": r["active_jobs"],
+                            "APEX_APPLICATIONS": r["apex_apps"],
                             "ENABLED_TRIGGERS": r["enabled_triggers"]
                         },
                         "reason": r["reason"]
@@ -2389,35 +2238,23 @@ async def generate_report(payload: Dict = Body(...)):
             if fmt == "pdf":
                 pdf_bytes = build_standard_pdf(profile, report_data, ai_active=ai_active)
                 prefix = "report_auditoria_detallat" if _is_deep_audit_data(data) else "report_auditoria"
-                filename = f"{prefix}_{profile}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                return StreamingResponse(
-                    io.BytesIO(pdf_bytes),
-                    media_type="application/pdf",
-                    headers={"Content-Disposition": f"attachment; filename={filename}"},
-                )
+                filename = f"{prefix}_{profile}_{_report_timestamp_slug()}.pdf"
+                return _stream_attachment(pdf_bytes, "application/pdf", filename)
 
             report_content = build_standard_markdown(profile, report_data, ai_active=ai_active)
             prefix = "report_auditoria_detallat" if _is_deep_audit_data(data) else "report_auditoria"
-            filename = f"{prefix}_{profile}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-            return StreamingResponse(
-                io.BytesIO(report_content.encode("utf-8")),
-                media_type="text/markdown; charset=utf-8",
-                headers={"Content-Disposition": f"attachment; filename={filename}"},
-            )
+            filename = f"{prefix}_{profile}_{_report_timestamp_slug()}.md"
+            return _stream_attachment(report_content, "text/markdown; charset=utf-8", filename)
 
         raise HTTPException(status_code=400, detail="No hi ha dades d'auditoria per generar el report")
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("generate_report", operation)
 
 
 @app.post("/api/report/generate-experimental")
 async def generate_experimental_report(payload: Dict = Body(...)):
     """Genera un PDF experimental del post-CRQ sense afectar el flux oficial."""
-    try:
+    def operation():
         data = payload.get("data", [])
         profile = payload.get("profile", "default")
         variant = (payload.get("variant") or "general").strip().lower()
@@ -2440,39 +2277,30 @@ async def generate_experimental_report(payload: Dict = Body(...)):
 
         pdf_bytes = build_post_crq_experimental_pdf(profile, data)
         lot_suffix = f"_{lot_code}" if variant == "lot" else ""
-        filename = f"report_auditoria_post_crq_experimental_{profile}{lot_suffix}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-        return StreamingResponse(
-            io.BytesIO(pdf_bytes),
-            media_type="application/pdf",
-            headers={"Content-Disposition": f"attachment; filename={filename}"},
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        filename = f"report_auditoria_post_crq_experimental_{profile}{lot_suffix}_{_report_timestamp_slug()}.pdf"
+        return _stream_attachment(pdf_bytes, "application/pdf", filename)
+
+    return _run_with_internal_http_error("generate_experimental_report", operation)
 
 @app.post("/api/queries/export")
 async def export_query_results(data: List[Dict] = Body(...)):
     """Genera un fitxer Excel a partir de resultats i el retorna."""
-    try:
+    def operation():
         import io
-        from fastapi.responses import StreamingResponse
-        
+
         df = pd.DataFrame(data)
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Resultats')
-        
+
         buffer.seek(0)
-        return StreamingResponse(
-            buffer, 
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": "attachment; filename=resultats_consulta.xlsx"}
+        return _stream_attachment(
+            buffer,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "resultats_consulta.xlsx",
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("export_query_results", operation)
 
 # --- Unified React API additions: Snapshots + Obsolets registry ---
 
@@ -2502,7 +2330,8 @@ def _parquet_num_rows(path: str) -> Optional[int]:
 
         pf = pq.ParquetFile(path)
         return int(pf.metadata.num_rows)
-    except Exception:
+    except (ImportError, OSError, ValueError) as exc:
+        logger.warning("No s'han pogut llegir les files del parquet %s", path, exc_info=exc)
         return None
 
 
@@ -2517,23 +2346,40 @@ def _apply_snapshot_filters(df: pd.DataFrame, schemas, recommendations, min_scor
         try:
             ms = float(min_score)
             out = out[out["score"].astype(float) >= ms]
-        except Exception:
-            pass
+        except (TypeError, ValueError):
+            logger.debug("min_score invalid ignorat al filtre de snapshots: %r", min_score)
     return out
+
+
+def _ctime_to_utc_iso(created_at: float) -> str:
+    return utc_isoformat(datetime.datetime.fromtimestamp(created_at, tz=datetime.timezone.utc))
+
+
+def _resolve_snapshot_path(snapshot_dir: str, snapshot_id: str, files: List[str]) -> str:
+    if not files:
+        raise HTTPException(status_code=404, detail="No hi ha snapshots")
+
+    if snapshot_id:
+        path = os.path.abspath(os.path.join(snapshot_dir, snapshot_id))
+        if not path.startswith(os.path.abspath(snapshot_dir) + os.sep) or not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail="Snapshot no trobat")
+        return path
+
+    return max(files, key=lambda p: os.path.getctime(p))
 
 
 @app.get("/api/snapshots")
 async def list_snapshots():
     """Llista snapshots (parquet) disponibles."""
-    try:
+    def operation():
         d = _snapshots_dir()
         files = _list_parquet_files(d)
         items = []
         for p in files:
             try:
                 created = os.path.getctime(p)
-                created_iso = datetime.datetime.fromtimestamp(created).isoformat()
-            except Exception:
+                created_iso = _ctime_to_utc_iso(created)
+            except OSError:
                 created_iso = None
             items.append(
                 {
@@ -2544,14 +2390,14 @@ async def list_snapshots():
             )
         items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
         return {"snapshots": items, "dir": d}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("list_snapshots", operation)
 
 
 @app.get("/api/snapshots/latest")
 async def latest_snapshot():
-    """Retorna el snapshot mÃ©s recent (parquet)."""
-    try:
+    """Retorna el snapshot mes recent (parquet)."""
+    def operation():
         d = _snapshots_dir()
         files = _list_parquet_files(d)
         if not files:
@@ -2561,31 +2407,25 @@ async def latest_snapshot():
         return {
             "snapshot": {
                 "snapshot_id": os.path.basename(latest),
-                "created_at": datetime.datetime.fromtimestamp(created).isoformat(),
+                "created_at": _ctime_to_utc_iso(created),
                 "rows_estimated": _parquet_num_rows(latest),
             },
             "dir": d,
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("latest_snapshot", operation)
 
 
 @app.post("/api/snapshots/query")
 async def query_snapshots(payload: Dict = Body(...)):
     """Query server-side del snapshot (filtres + paginaciÃ³ + sort)."""
-    try:
+    def operation():
         d = _snapshots_dir()
         snapshot_id = (payload.get("snapshot_id") or "").strip()
         files = _list_parquet_files(d)
         if not files:
             return {"rows": [], "summary": {"total_objects": 0}, "facets": {"schemas": [], "recommendations": []}}
-
-        if snapshot_id:
-            path = os.path.abspath(os.path.join(d, snapshot_id))
-            if not path.startswith(os.path.abspath(d) + os.sep) or not os.path.isfile(path):
-                raise HTTPException(status_code=404, detail="Snapshot no trobat")
-        else:
-            path = max(files, key=lambda p: os.path.getctime(p))
+        path = _resolve_snapshot_path(d, snapshot_id, files)
 
         df = pd.read_parquet(path)
         facets = {
@@ -2633,28 +2473,18 @@ async def query_snapshots(payload: Dict = Body(...)):
             "facets": facets,
             "page": {"limit": limit, "offset": offset},
         }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("query_snapshots", operation)
 
 
 @app.post("/api/snapshots/export.csv")
 async def export_snapshot_csv(payload: Dict = Body(...)):
     """Export CSV del snapshot filtrat."""
-    try:
+    def operation():
         d = _snapshots_dir()
         snapshot_id = (payload.get("snapshot_id") or "").strip()
         files = _list_parquet_files(d)
-        if not files:
-            raise HTTPException(status_code=404, detail="No hi ha snapshots")
-
-        if snapshot_id:
-            path = os.path.abspath(os.path.join(d, snapshot_id))
-            if not path.startswith(os.path.abspath(d) + os.sep) or not os.path.isfile(path):
-                raise HTTPException(status_code=404, detail="Snapshot no trobat")
-        else:
-            path = max(files, key=lambda p: os.path.getctime(p))
+        path = _resolve_snapshot_path(d, snapshot_id, files)
 
         df = pd.read_parquet(path)
         filtered = _apply_snapshot_filters(
@@ -2666,15 +2496,9 @@ async def export_snapshot_csv(payload: Dict = Body(...)):
 
         csv_bytes = filtered.to_csv(index=False).encode("utf-8")
         filename = f"{os.path.splitext(os.path.basename(path))[0]}_export.csv"
-        return StreamingResponse(
-            io.BytesIO(csv_bytes),
-            media_type="text/csv; charset=utf-8",
-            headers={"Content-Disposition": f"attachment; filename={filename}"},
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return _stream_attachment(csv_bytes, "text/csv; charset=utf-8", filename)
+
+    return _run_with_internal_http_error("export_snapshot_csv", operation)
 
 
 @app.get("/api/obsolets")
@@ -2687,7 +2511,7 @@ async def list_obsolets(
     offset: int = 0,
 ):
     """Llista el registre d'obsolets (SQLite meta_objects)."""
-    try:
+    def operation():
         rows, cols = internal_db.list_meta_objects(
             only_obsolete=only_obsolete,
             schema_name=schema_name,
@@ -2697,14 +2521,14 @@ async def list_obsolets(
             offset=offset,
         )
         return {"items": [dict(zip(cols, r)) for r in rows], "page": {"limit": limit, "offset": offset}}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("list_obsolets", operation)
 
 
 @app.post("/api/obsolets")
 async def create_obsolet(payload: Dict = Body(...)):
     """Afegeix una entrada al registre d'obsolets."""
-    try:
+    def operation():
         schema_name = (payload.get("schema_name") or "").strip()
         object_name = (payload.get("object_name") or "").strip()
         object_type = (payload.get("object_type") or "").strip()
@@ -2730,90 +2554,57 @@ async def create_obsolet(payload: Dict = Body(...)):
             is_obsolete=is_obsolete,
         )
         return {"status": "success", "id": obj_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_with_internal_http_error("create_obsolet", operation)
 
 
 @app.patch("/api/obsolets/{obj_id}")
 async def update_obsolet(obj_id: int, payload: Dict = Body(...)):
     """Actualitza camps d'una entrada del registre d'obsolets."""
-    try:
+    def operation():
         updated = internal_db.update_meta_object(int(obj_id), **payload)
         if not updated:
             raise HTTPException(status_code=404, detail="No trobat o sense canvis")
         return {"status": "success"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-# Servir fitxers estàtics del frontend (compatibilitat desenvolupament i PyInstaller)
-if hasattr(sys, '_MEIPASS'):
-    frontend_path = os.path.abspath(os.path.join(sys._MEIPASS, "src", "web-app", "dist"))
-    manual_path = os.path.abspath(os.path.join(sys._MEIPASS, "docs", "build"))
-else:
-    frontend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "web-app", "dist"))
-    manual_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "docs", "build"))
+    return _run_with_internal_http_error("update_obsolet", operation)
 
-print(f"DEBUG: Buscant frontend a: {frontend_path}")
+# Servir fitxers estÃ tics del frontend
+frontend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "web-app", "dist"))
+logger.debug("Buscant frontend a: %s", frontend_path)
 
-# Muntem el manual de Docusaurus si existeix (accessible a /docs)
-if os.path.exists(manual_path):
-    print(f"DEBUG: Muntant manual a: {manual_path}")
-    app.mount("/docs", StaticFiles(directory=manual_path, html=True), name="manual_docs")
-else:
-    print(f"WARNING: No s'ha trobat la carpeta 'docs/build'. El manual interactiu no estarà disponible.")
-
-
-# Servir fitxers estàtics del frontend (React SPA)
 if os.path.exists(frontend_path):
-    # Muntem la carpeta d'assets si existeix
-    assets_dir = os.path.join(frontend_path, "assets")
-    if os.path.exists(assets_dir):
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+    # Muntem la carpeta d'estÃ tics per a fitxers directes (js, css, images)
+    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_path, "assets")), name="assets")
 
+    # Qualsevol altra ruta que no sigui API, retorna l'index.html (SPA support)
     @app.get("/{full_path:path}")
-    async def serve_spa(full_path: str):
-        # No servim index.html per a rutes que clarament haurien de ser API o Docs
-        if full_path.startswith("api/") or full_path.startswith("docs"):
-            return JSONResponse(status_code=404, content={"detail": f"Path '{full_path}' not found"})
+    async def serve_spa(request: Request, full_path: str = ""):
+        logger.debug("Catch-all SPA: full_path='%s', url='%s'", full_path, request.url)
+        if full_path.startswith("api"):
+             raise HTTPException(status_code=404, detail=f"API endpoint '{full_path}' not found")
 
-        # Si el fitxer existeix directament (ex: favicon.ico, vite.svg)
-        potential_file = os.path.join(frontend_path, full_path)
-        if full_path and os.path.isfile(potential_file):
-            return FileResponse(potential_file)
+        # Servir fitxers individuals si existeixen a la rrel (ex: vite.svg, favicon.ico)
+        if full_path:
+            potential_file = os.path.join(frontend_path, full_path)
+            if os.path.isfile(potential_file):
+                return FileResponse(potential_file)
 
-        # Per a la resta, servim l'index.html (SPA routing)
         index_file = os.path.join(frontend_path, "index.html")
-        if os.path.exists(index_file):
-            return FileResponse(index_file)
-        
-        return JSONResponse(status_code=404, content={"error": "Frontend build missing"})
+        return FileResponse(index_file)
 
     @app.get("/")
     async def serve_root():
         index_file = os.path.join(frontend_path, "index.html")
-        if os.path.exists(index_file):
-            return FileResponse(index_file)
-        return JSONResponse(content={"message": "API is running. Frontend build missing."})
+        return FileResponse(index_file)
 else:
-    print("WARNING: No s'ha trobat la carpeta 'dist'. El frontend no estarà disponible.")
+    logger.warning("No s'ha trobat la carpeta 'dist'. El frontend no estarà disponible.")
     @app.get("/")
     async def root_info():
         return {"message": "API is running. Frontend build missing.", "expected_path": frontend_path}
 
 if __name__ == "__main__":
     import uvicorn
-    # Si s'executa com a executable empaquetat per PyInstaller
-    if hasattr(sys, 'frozen'):
-        uvicorn.run(app, host="127.0.0.1", port=8000)
-    else:
-        # En mode de desenvolupament normal usem recàrrega automàtica
-        uvicorn.run("src.api.main:app", host="0.0.0.0", port=8000, reload=True)
-
-
-
-
-
+    # Use string "main:app" for reload to work correctly
+    port_env = int(os.environ.get("PORT", 8011))
+    uvicorn.run("src.api.main:app", host="0.0.0.0", port=port_env, reload=True)

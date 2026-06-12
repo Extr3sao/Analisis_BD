@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 .venv/
+.venv314/
+.pydeps314/
 .pytest_cache/
 .coverage
 htmlcov/
@@ -18,8 +20,11 @@ src/web-app/dist/
 .eslintcache
 
 # Databases & IDE
+.env
+!.env.example
 *.db
 *.sqlite3
+config/Cadena_conexions.txt
 .vscode/
 .idea/
 .DS_Store
@@ -31,7 +36,10 @@ instantclient/
 *.dll
 
 # Logs & Temp
+scratch/
 logs/
+backend_start*.log
+frontend_dev*.log
 *.log
 tmp/
 temp_copy.db
@@ -39,44 +47,20 @@ out_*.txt
 out_*.json
 
 # Project specific ignores
+.old/
+....old/
 .agent/
 .playwright-cli/
 backup_audits/
 notebooklm_export/
 output/
+resources/automation_reports/
+resources/test_automation_reports/
+data/reports/
+resources/report_debug.pdf
 tmp_*/
+tmp-*
+tmp_*
 *.bak
 *.bak[0-9]*
 *.zip
-
-# Environment variables & Sensitive data
-.env
-.env.local
-.env.*.local
-config/.env
-config/Cadena_conexions.txt
-config/*.txt
-**/credentials.json
-**/*.key
-**/*.pem
-
-# Temporary files & Scratch
-scratch/
-tmp/
-tmp_*/
-*.bak
-*.bak[0-9]*
-temp_copy.db
-
-# Reports & Data outputs
-*.xlsx
-*.pdf
-reports/
-output/
-backup_audits/
-
-# OS/IDE
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db

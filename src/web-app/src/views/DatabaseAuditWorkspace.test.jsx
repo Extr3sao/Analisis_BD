@@ -25,7 +25,7 @@ const deepScanViewMock = vi.fn((props) => (
 vi.mock('./PostCrqAuditView.jsx', () => ({ default: (props) => postCrqViewMock(props) }));
 vi.mock('./DeepScanView.jsx', () => ({ default: (props) => deepScanViewMock(props) }));
 vi.mock('./AutomationView.jsx', () => ({ default: () => <div>Automation view mock</div> }));
-
+vi.mock('./AutomationRulesView.jsx', () => ({ default: () => <div>Automation rules mock</div> }));
 vi.mock('./ChecksAdminView.jsx', () => ({ default: () => <div>Checks admin mock</div> }));
 vi.mock('./MailConfigView.jsx', () => ({ default: () => <div>Mail config mock</div> }));
 vi.mock('./ObsoletsRegistryView.jsx', () => ({ default: () => <div>Obsolets registry mock</div> }));

@@ -1031,6 +1031,70 @@ export const PAGE_HELP_CONTENT = {
       'Usa esta guía cuando dudes entre dos pantallas del módulo; para trabajo operativo diario es mejor la ayuda contextual de cada vista.',
     ],
   }),
+  automationRules: guide({
+    title: 'Tasques i regles',
+    summary: 'Configura reglas globales de severidad y gestiona la bandeja interna de tareas derivadas de automatizaciones.',
+    purpose: 'Traducir hallazgos automáticos en acciones operativas: crear tarea, enviar correo, adjuntar informe y seguir el estado de resolución.',
+    highlights: [
+      { label: 'Controla', value: 'Reglas globales por severidad y estado de tareas internas' },
+      { label: 'Entrada', value: 'Severidad, prioridad, destinatarios, mínimo de hallazgos y estado habilitado' },
+      { label: 'Salida', value: 'Reglas activas y tareas actualizadas para seguimiento operativo' },
+    ],
+    diagram: {
+      center: {
+        label: 'Tasques i regles',
+        subtitle: 'Capa de gobierno operativo sobre los hallazgos automáticos',
+        icon: 'ShieldAlert',
+      },
+      branches: [
+        branch('Reglas', 'CheckSquare', 'Definen qué pasa cuando aparece una severidad concreta.', [
+          'Crear tarea',
+          'Enviar correo',
+          'Adjuntar informe',
+          'Mínimo de hallazgos',
+        ], 'primary'),
+        branch('Tareas', 'Workflow', 'La segunda mitad de la vista hace seguimiento del trabajo derivado.', [
+          'Estado',
+          'Prioridad',
+          'Resolución',
+        ], 'process'),
+        branch('Conexiones', 'GitBranch', 'Se apoya en el resultado de las automatizaciones y condiciona la operación diaria.', [
+          'Findings automáticos',
+          'Seguimiento interno',
+          'Comunicación por correo',
+        ], 'related'),
+      ],
+    },
+    actions: [
+      action('Editar reglas globales existentes', 'Cada regla define cómo se comporta el sistema ante una severidad dada.'),
+      action('Crear una regla nueva', 'Puedes añadir una combinación nueva de prioridad, envío, adjunto y umbral mínimo.', 'CheckSquare'),
+      action('Actualizar tareas abiertas', 'La bandeja de tareas permite mover el trabajo entre pendiente, en curso, resuelta o descartada.', 'Workflow'),
+    ],
+    workflow: [
+      step('Cargas reglas y tareas', 'La pantalla consulta ambas colecciones en paralelo.'),
+      step('Ajustas la lógica operativa', 'Guardas cambios en reglas globales o creas una nueva.'),
+      step('Gestionas la ejecución humana', 'La misma vista permite actualizar el estado de las tareas derivadas.'),
+    ],
+    architecture: {
+      components: ['`AutomationRulesView.jsx` agrupa edición de reglas y bandeja de tareas.'],
+      dataSources: ['`listSeverityRules`, `createSeverityRule`, `updateSeverityRule`, `listAutomationTasks`, `updateAutomationTask`.'],
+      processes: ['Carga paralela, edición en memoria y persistencia puntual por acción.'],
+      integrations: ['Backend de automatización y pipeline que genera hallazgos automáticos.'],
+    },
+    relatedData: [
+      datum('Input', 'Severidad, prioridad, destinatarios, mínimos y estado de tarea', 'input'),
+      datum('Persistencia', 'Reglas y tareas en el backend de automatización', 'store'),
+      datum('Output', 'Gobierno operativo actualizado sobre hallazgos automáticos', 'output'),
+    ],
+    relationships: {
+      incoming: ['Se alimenta de las severidades generadas por el circuito automático.'],
+      outgoing: ['Condiciona qué tareas se crean y cuándo se envían correos.'],
+      dependencies: ['Servicios de severity rules y automation tasks.'],
+    },
+    tips: [
+      'Antes de endurecer una regla, revisa el volumen en Dashboard e Històric para no disparar demasiadas tareas o correos.',
+    ],
+  }),
   checksAdmin: guide({
     title: 'Gestió de controls',
     summary: 'Administra els checks SQL del sistema con CRUD, versionado, prevalidación, diff, regeneración IA y herramientas de transformación SQL.',

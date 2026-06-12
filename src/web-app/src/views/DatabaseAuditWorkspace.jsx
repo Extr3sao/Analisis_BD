@@ -5,7 +5,7 @@ import { DATABASE_AUDIT_SUBTABS } from '../config/databaseAuditTabs.js';
 const ObsoletsRegistryView = lazy(() => import('./ObsoletsRegistryView.jsx'));
 const PostCrqAuditView = lazy(() => import('./PostCrqAuditView.jsx'));
 const AutomationView = lazy(() => import('./AutomationView.jsx'));
-
+const AutomationRulesView = lazy(() => import('./AutomationRulesView.jsx'));
 const TutorialView = lazy(() => import('./TutorialView.jsx'));
 const ChecksAdminView = lazy(() => import('./ChecksAdminView.jsx'));
 const MailConfigView = lazy(() => import('./MailConfigView.jsx'));
@@ -126,7 +126,9 @@ export default function DatabaseAuditWorkspace({
           {databaseAuditSubtab === SUBTAB_IDS.automationOverview && (
             <AutomationView profiles={profiles} onOpenPostCrqRun={handleOpenAutomationPostCrqRun} />
           )}
-
+          {databaseAuditSubtab === SUBTAB_IDS.automationRules && (
+            <AutomationRulesView />
+          )}
           {databaseAuditSubtab === SUBTAB_IDS.checksAdmin && (
             <ChecksAdminView profiles={profiles} selectedProfile={selectedProfile} />
           )}

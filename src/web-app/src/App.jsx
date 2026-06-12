@@ -1,5 +1,6 @@
 import { Suspense, lazy, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+
 import AppPageHeader from './components/AppPageHeader.jsx';
 import AppShellChrome from './components/AppShellChrome.jsx';
 import {
@@ -19,11 +20,9 @@ import useGlobalReport from './hooks/useGlobalReport.js';
 import usePersistedNavigationState from './hooks/usePersistedNavigationState.js';
 import usePostCrqAudit from './hooks/usePostCrqAudit.js';
 import useProfiles from './hooks/useProfiles.js';
-
 const DatabaseAuditWorkspace = lazy(() => import('./views/DatabaseAuditWorkspace.jsx'));
 const SystemArchitectureView = lazy(() => import('./views/SystemArchitectureView.jsx'));
-const ConfigurationView = lazy(() => import('./views/ConfigurationView.jsx'));
-const ManualView = lazy(() => import('./views/ManualView.jsx'));
+
 
 function App() {
   const [isEmbedded] = useState(() => typeof window !== 'undefined' && window.self !== window.top);
@@ -31,7 +30,6 @@ function App() {
     if (typeof window === 'undefined') return '';
     return String(new URL(window.location.href).searchParams.get('profile') || '').trim();
   });
-  
   const {
     activeTab,
     setActiveTab,
@@ -40,13 +38,11 @@ function App() {
     databaseAuditSubtab,
     setDatabaseAuditSubtab,
   } = usePersistedNavigationState();
-  
   const { profiles } = useProfiles({
     apiBase: API_BASE,
     onDefaultProfile: setSelectedProfile,
     preferredProfile: requestedProfile || selectedProfile,
   });
-  
   const {
     postCrqChecks,
     selectedChecks,
@@ -78,7 +74,6 @@ function App() {
     defaultSchedulerOptions: DEFAULT_POST_CRQ_SCHEDULER_OPTIONS,
     defaultCriticalityOverrides: DEFAULT_POST_CRQ_CRITICALITY_OVERRIDES,
   });
-  
   const {
     auditData,
     selectedAuditIndex,
@@ -100,9 +95,7 @@ function App() {
     selectedProfile,
     defaultScoringConfig: DEFAULT_SCORING_CONFIG,
   });
-  
   const currentPageHelpKey = resolvePageHelpKey(activeTab, databaseAuditSubtab);
-  
   const { loading, handleGenerateReport } = useGlobalReport({
     apiBase: API_BASE,
     activeTab,
@@ -111,14 +104,11 @@ function App() {
     auditData,
     postCrqReportData,
   });
-  
   const hideEmbeddedProfileSelector = (
     activeTab === 'Auditoria BBDD'
       && DATABASE_AUDIT_SUBTABS_HIDE_PROFILE_SELECTOR.includes(databaseAuditSubtab)
   );
-  
   const showHeaderProfileSelector = !hideEmbeddedProfileSelector;
-  
   const showGlobalReportControls = !(
     activeTab === 'Auditoria BBDD'
       && DATABASE_AUDIT_SUBTABS_HIDE_GLOBAL_REPORT.includes(databaseAuditSubtab)
@@ -126,10 +116,15 @@ function App() {
 
   function handleOpenAutomationPostCrqRun({ action, reportData, run }) {
     const nextProfile = run?.profile || reportData?.context?.profile || selectedProfile;
-    if (nextProfile) setSelectedProfile(nextProfile);
+    if (nextProfile) {
+      setSelectedProfile(nextProfile);
+    }
     setActiveTab('Auditoria BBDD');
     setDatabaseAuditSubtab('Auditoria de canvis');
-    const fallback = { profile: nextProfile, schemas: reportData?.context?.schemas || [] };
+    const fallback = {
+      profile: nextProfile,
+      schemas: reportData?.context?.schemas || [],
+    };
     if (action === 'live') {
       rerunPostCrqAuditFromSnapshot(reportData, fallback);
       return;
@@ -159,9 +154,9 @@ function App() {
             exit={{ opacity: 0, x: -20 }}
             transition={{ duration: 0.3 }}
             className={`mx-auto w-full ${
-              (activeTab === 'Auditoria BBDD' && databaseAuditSubtab === 'Automatitzacions') || activeTab === 'Configuració'
-                ? 'max-w-[1880px]'
-                : 'max-w-[1440px]'
+              activeTab === 'Auditoria BBDD' && databaseAuditSubtab === 'Automatitzacions'
+                ? 'max-w-[1780px]'
+                : 'max-w-[1400px]'
             }`}
           >
             <Suspense fallback={<div className="glass-card p-6 text-sm text-muted-foreground">Carregant vista...</div>}>
@@ -222,20 +217,20 @@ function App() {
                 />
               )}
 
-              {activeTab === 'Arquitectura' && <SystemArchitectureView />}
-              {activeTab === 'Configuració' && <ConfigurationView />}
-              {activeTab === 'Manual' && <ManualView />}
+              {activeTab === 'Arquitectura' && (
+                <SystemArchitectureView />
+              )}
             </Suspense>
-          </motion.div>
-        </AnimatePresence>
-      </main>
-      
-      {!isEmbedded && (
-        <footer className="app-footer">
-          Entorn intern. Sense dades personals fora del sistema.
-        </footer>
-      )}
-    </div>
+
+        </motion.div>
+      </AnimatePresence>
+    </main>
+    {!isEmbedded && (
+      <footer className="app-footer">
+        Entorn intern. Sense dades personals fora del sistema.
+      </footer>
+    )}
+  </div>
   );
 }
 
