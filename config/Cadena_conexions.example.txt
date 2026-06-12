@@ -1,0 +1,13 @@
+# Plantilla de perfils Oracle.
+# Copia aquest fitxer com config/Cadena_conexions.txt i substitueix els valors.
+# El fitxer real config/Cadena_conexions.txt esta ignorat per Git per no publicar credencials.
+
+## E13DB
+USER = usuari_oracle
+PASSWORD = contrasenya_oracle
+DSN = host:1521/servei
+
+## E13DB_PRE
+USER = usuari_oracle_pre
+PASSWORD = contrasenya_oracle_pre
+DSN = host-pre:1521/servei_pre

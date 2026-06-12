@@ -282,6 +282,45 @@ $env:BOOTSTRAP_DATA_PATH='resources\bootstrap\initial_data.local.json'
 
 Els fitxers `resources/bootstrap/*.local.json` estan ignorats per Git per evitar publicar dades internes.
 
+### Configuracio BBDD Oracle
+
+El repositori no publica credencials ni cadenes de connexio reals. Per aixo `config/Cadena_conexions.txt` esta ignorat per Git.
+
+En el primer `.\run.ps1`, si no existeix, es crea automaticament a partir de:
+
+```text
+config/Cadena_conexions.example.txt
+```
+
+Abans d'executar consultes contra Oracle real, edita:
+
+```text
+config/Cadena_conexions.txt
+```
+
+Format:
+
+```txt
+## E13DB
+USER = usuari_oracle
+PASSWORD = contrasenya_oracle
+DSN = host:1521/servei
+```
+
+Si vols definir quin perfil s'usa per defecte, crea o edita `config/.env`:
+
+```env
+DEFAULT_PROFILE=E13DB
+CONNECTIONS_FILE=config\Cadena_conexions.txt
+ORACLE_CLIENT_LIB_DIR=C:\oracle\instantclient
+```
+
+Notes:
+
+- `ORACLE_CLIENT_LIB_DIR` nomes cal si la instal.lacio Oracle ho requereix.
+- Sense configurar `config/Cadena_conexions.txt`, l'aplicacio pot arrencar i mostrar les dades inicials locals, pero les consultes contra Oracle real fallaran o no retornaran dades reals.
+- No s'ha de pujar mai `config/Cadena_conexions.txt`, `config/.env`, `.env` ni cap fitxer `.db` amb dades reals al repositori.
+
 ### Opcio manual
 
 Backend:

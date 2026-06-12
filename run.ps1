@@ -51,6 +51,17 @@ function Invoke-FrontendBuild {
     }
 }
 
+function Initialize-OracleConnectionTemplate {
+    $connectionsPath = Join-Path $ProjectRoot "config\Cadena_conexions.txt"
+    $templatePath = Join-Path $ProjectRoot "config\Cadena_conexions.example.txt"
+
+    if ((-not (Test-Path -LiteralPath $connectionsPath)) -and (Test-Path -LiteralPath $templatePath)) {
+        Copy-Item -LiteralPath $templatePath -Destination $connectionsPath
+        Write-Host "-> Creat config\Cadena_conexions.txt des de la plantilla." -ForegroundColor Yellow
+        Write-Host "-> Edita USER, PASSWORD i DSN abans d'executar consultes contra Oracle real." -ForegroundColor Yellow
+    }
+}
+
 Set-Location $ProjectRoot
 
 Write-Host "`n[1/5] Verificant entorn Python..." -ForegroundColor Yellow
@@ -76,6 +87,8 @@ if ($env:BOOTSTRAP_INITIAL_DATA -ne "0") {
 else {
     Write-Host "`n[3/5] Carrega de dades inicials desactivada." -ForegroundColor Yellow
 }
+
+Initialize-OracleConnectionTemplate
 
 Write-Host "`n[4/5] Generant build del frontend..." -ForegroundColor Yellow
 Set-Location (Join-Path $ProjectRoot "src\web-app")
