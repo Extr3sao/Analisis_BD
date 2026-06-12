@@ -58,6 +58,7 @@ resources/automation_reports/
 resources/test_automation_reports/
 data/reports/
 resources/report_debug.pdf
+resources/bootstrap/*.local.json
 tmp_*/
 tmp-*
 tmp_*

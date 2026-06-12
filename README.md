@@ -228,16 +228,59 @@ L'script `run.ps1`:
 
 1. crea `.venv` si no existeix, o el recrea si apunta a una instal.lacio de Python que ja no existeix
 2. installa dependencies Python
-3. entra a `src/web-app`
-4. installa dependencies Node si cal
-5. executa `npm run build`
-6. arrenca `uvicorn src.api.main:app --host 127.0.0.1 --port 8000`
+3. crea les bases SQLite locals si no existeixen
+4. carrega dades inicials segures si les bases estan buides
+5. entra a `src/web-app`
+6. installa dependencies Node si cal
+7. executa `npm run build`
+8. arrenca `uvicorn src.api.main:app --host 127.0.0.1 --port 8000`
 
 Quan el servidor estigui arrencat, obre:
 
 ```text
 http://127.0.0.1:8000
 ```
+
+### Dades inicials
+
+En una descarrega neta, el primer `.\run.ps1` carrega automaticament les dades de:
+
+```text
+resources/bootstrap/initial_data.json
+```
+
+Aixo deixa visibles dades de partida per a:
+
+- jobs programats
+- lots mestres
+- mapatge `schema -> lot`
+- destinataris per lot
+- plantilles de distribucio
+
+Aquest fitxer no conte contrasenyes, cadenes Oracle reals, `.env` ni bases SQLite. Les bases locals es creen fora del repo, per defecte a:
+
+```text
+%LOCALAPPDATA%\OracleAudit\internal.db
+%LOCALAPPDATA%\OracleAudit\automation.db
+```
+
+Si ja hi ha dades locals, el bootstrap es salta i no les sobreescriu.
+
+Per arrencar sense carregar dades inicials:
+
+```powershell
+$env:BOOTSTRAP_INITIAL_DATA='0'
+.\run.ps1
+```
+
+Per usar un bootstrap privat propi:
+
+```powershell
+$env:BOOTSTRAP_DATA_PATH='resources\bootstrap\initial_data.local.json'
+.\run.ps1
+```
+
+Els fitxers `resources/bootstrap/*.local.json` estan ignorats per Git per evitar publicar dades internes.
 
 ### Opcio manual
 

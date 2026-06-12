@@ -53,20 +53,31 @@ function Invoke-FrontendBuild {
 
 Set-Location $ProjectRoot
 
-Write-Host "`n[1/3] Verificant entorn Python..." -ForegroundColor Yellow
+Write-Host "`n[1/5] Verificant entorn Python..." -ForegroundColor Yellow
 if (-not (Test-VenvPython)) {
     New-ProjectVenv
 }
 
 & $VenvPython --version
 
-Write-Host "`n[2/3] Instal.lant dependencies de Python..." -ForegroundColor Yellow
+Write-Host "`n[2/5] Instal.lant dependencies de Python..." -ForegroundColor Yellow
 & $VenvPython -m pip install -r requirements.txt
 if ($LASTEXITCODE -ne 0) {
     throw "La instal.lacio de dependencies Python ha fallat amb codi $LASTEXITCODE"
 }
 
-Write-Host "`n[3/3] Generant build del frontend..." -ForegroundColor Yellow
+if ($env:BOOTSTRAP_INITIAL_DATA -ne "0") {
+    Write-Host "`n[3/5] Carregant dades inicials si cal..." -ForegroundColor Yellow
+    & $VenvPython scripts\bootstrap_initial_data.py
+    if ($LASTEXITCODE -ne 0) {
+        throw "La carrega de dades inicials ha fallat amb codi $LASTEXITCODE"
+    }
+}
+else {
+    Write-Host "`n[3/5] Carrega de dades inicials desactivada." -ForegroundColor Yellow
+}
+
+Write-Host "`n[4/5] Generant build del frontend..." -ForegroundColor Yellow
 Set-Location (Join-Path $ProjectRoot "src\web-app")
 
 if (-not (Test-Path -LiteralPath "node_modules")) {
@@ -80,7 +91,7 @@ if (-not (Test-Path -LiteralPath "node_modules")) {
 Invoke-FrontendBuild
 Set-Location $ProjectRoot
 
-Write-Host "`n[4/4] Iniciant sistema unificat (http://127.0.0.1:8000)..." -ForegroundColor Yellow
+Write-Host "`n[5/5] Iniciant sistema unificat (http://127.0.0.1:8000)..." -ForegroundColor Yellow
 Write-Host "-> Prem CTRL+C per aturar el servidor." -ForegroundColor Green
 & $VenvPython -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000
 if ($LASTEXITCODE -ne 0) {
