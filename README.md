@@ -199,16 +199,45 @@ Variables utiles:
 
 ## Arrencada
 
+### Requisits previs
+
+- Windows PowerShell
+- Python disponible al `PATH`
+- Node.js i npm disponibles al `PATH`
+- fitxer `.env` configurat a partir de `.env.example`, si cal
+- perfils Oracle configurats a `config/Cadena_conexions.txt`, si cal connexio real a Oracle
+
 ### Opcio unificada
 
-`run.ps1`:
+Des de l'arrel del projecte, executa:
 
-1. crea `.venv` si no existeix
+```powershell
+.\run.ps1
+```
+
+Important: en PowerShell cal usar `.\run.ps1`. No facis servir `\run.ps1`, perque la barra inicial busca l'script a l'arrel del disc (`C:\run.ps1`) i no a la carpeta actual.
+
+Si PowerShell bloqueja l'execucio de scripts, pots permetre-la nomes per a la sessio actual:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\run.ps1
+```
+
+L'script `run.ps1`:
+
+1. crea `.venv` si no existeix, o el recrea si apunta a una instal.lacio de Python que ja no existeix
 2. installa dependencies Python
 3. entra a `src/web-app`
 4. installa dependencies Node si cal
 5. executa `npm run build`
 6. arrenca `uvicorn src.api.main:app --host 127.0.0.1 --port 8000`
+
+Quan el servidor estigui arrencat, obre:
+
+```text
+http://127.0.0.1:8000
+```
 
 ### Opcio manual
 
