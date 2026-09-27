@@ -156,7 +156,9 @@ def _stream_attachment(
 
 def _raise_internal_http_error(stage: str, exc: Exception) -> None:
     logger.exception("Error intern a %s", stage)
-    raise HTTPException(status_code=500, detail=str(exc)) from exc
+    # Exception text may contain connection strings, file paths, or provider details.
+    # Keep it in the server log while returning a stable, non-sensitive API contract.
+    raise HTTPException(status_code=500, detail="Error intern del servidor") from exc
 
 
 def _run_with_internal_http_error(stage: str, operation):
@@ -910,10 +912,10 @@ async def generate_post_crq_by_lots(payload: Dict = Body(...)):
             criticality_overrides=criticality_overrides,
             scheduler_options=scheduler_options,
         )
-
+        
         # 2. Generar el ZIP mitjançant la nova funció
         zip_bytes = build_post_crq_zip_bundle(selected_profile, report)
-
+        
         filename = f"auditoria_lots_{selected_profile}_{_report_timestamp_slug()}.zip"
         return _stream_attachment(zip_bytes, "application/zip", filename)
 
@@ -1711,7 +1713,7 @@ async def test_db(
         return {"status": "error", "message": "Resposta inesperada de la BBDD"}
     except (RuntimeError, ValueError, TypeError, OSError) as exc:
         logger.warning("Error provant la connexio Oracle", exc_info=exc)
-        return {"status": "error", "message": str(exc)}
+        return {"status": "error", "message": "No s'ha pogut provar la connexio a la BBDD"}
     finally:
         if dbm:
             dbm.close()
@@ -2086,7 +2088,7 @@ def _build_deep_markdown_report(profile: str, data: List[Dict]) -> str:
         jobs = int(_to_float(summary.get('ACTIVE_JOBS'), 0))
         apex = int(_to_float(summary.get('APEX_APPLICATIONS'), 0))
         trigs = int(_to_float(summary.get('ENABLED_TRIGGERS'), 0))
-
+        
         if score >= 100 and (in_deps + jobs + apex + trigs) == 0 and decision == "PRECAUCIO":
             decision = "ELIMINAR"
 
@@ -2175,7 +2177,7 @@ def _get_api_insights(profile: str, data: List[Dict]) -> str:
             )
 
         total_schemas = len(data)
-        prompt = f"""Ets un DBA Oracle Senior i Consultor Estrategic per al perfil '{profile}'.
+        prompt = f"""Ets un DBA Oracle Senior i Consultor Estrategic per al perfil '{profile}'. 
 DADES D'ENTRADA ({total_schemas} esquemes):
 {chr(10).join(schema_lines)}
 """
@@ -2197,7 +2199,7 @@ async def generate_report(payload: Dict = Body(...)):
         if _is_deep_audit_data(data) or _is_post_crq_data(data) or rows:
             # IA deshabilitada per defecte, es pot activar des del payload
             ai_active = payload.get("ai_active", False)
-
+            
             # Post-CRQ Case
             if _is_post_crq_data(data):
                 if fmt == "pdf":
@@ -2220,14 +2222,14 @@ async def generate_report(payload: Dict = Body(...)):
             else:
                 report_data = [
                     {
-                        "username": r["schema"],
-                        "audit_result": r["decision"],
+                        "username": r["schema"], 
+                        "audit_result": r["decision"], 
                         "obsolescence_score": r["score"],
                         "summary": {
-                            "SIZE_GB": r["size_gb"],
-                            "INBOUND_REFERENCES": r["inbound_refs"],
-                            "ACTIVE_JOBS": r["active_jobs"],
-                            "APEX_APPLICATIONS": r["apex_apps"],
+                            "SIZE_GB": r["size_gb"], 
+                            "INBOUND_REFERENCES": r["inbound_refs"], 
+                            "ACTIVE_JOBS": r["active_jobs"], 
+                            "APEX_APPLICATIONS": r["apex_apps"], 
                             "ENABLED_TRIGGERS": r["enabled_triggers"]
                         },
                         "reason": r["reason"]
@@ -2287,12 +2289,12 @@ async def export_query_results(data: List[Dict] = Body(...)):
     """Genera un fitxer Excel a partir de resultats i el retorna."""
     def operation():
         import io
-
+        
         df = pd.DataFrame(data)
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Resultats')
-
+        
         buffer.seek(0)
         return _stream_attachment(
             buffer,
@@ -2583,7 +2585,7 @@ if os.path.exists(frontend_path):
         logger.debug("Catch-all SPA: full_path='%s', url='%s'", full_path, request.url)
         if full_path.startswith("api"):
              raise HTTPException(status_code=404, detail=f"API endpoint '{full_path}' not found")
-
+        
         # Servir fitxers individuals si existeixen a la rrel (ex: vite.svg, favicon.ico)
         if full_path:
             potential_file = os.path.join(frontend_path, full_path)
@@ -2592,7 +2594,7 @@ if os.path.exists(frontend_path):
 
         index_file = os.path.join(frontend_path, "index.html")
         return FileResponse(index_file)
-
+        
     @app.get("/")
     async def serve_root():
         index_file = os.path.join(frontend_path, "index.html")
@@ -2608,3 +2610,7 @@ if __name__ == "__main__":
     # Use string "main:app" for reload to work correctly
     port_env = int(os.environ.get("PORT", 8011))
     uvicorn.run("src.api.main:app", host="0.0.0.0", port=port_env, reload=True)
+
+
+
+

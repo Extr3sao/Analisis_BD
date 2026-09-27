@@ -43,7 +43,7 @@ Aquesta documentació detalla el funcionament, l'arquitectura i la integració a
 - **Impacte IA**: Defineix el `SYSTEM_PROMPT` que categoritza el risc.
 
 ### `src/core/report_design_agent.py` & `src/api/report_builder.py`
-- **Funció**: `ReportDesignAgent` actua com a cervell de disseny que exposa un JSON de configuració de seccions de report.
+- **Funció**: `ReportDesignAgent` actua com a cervell de disseny que exposa un JSON de configuració de seccions de report. 
 - **Què hi passa dins**: `report_builder.py` rep la informació i itera de manera dinàmica per generar l'HTML, el Markdown o el PDF d'acord amb el disseny subministrat.
 
 ### `src/web-app/src/views/MailConfigView.jsx`
@@ -98,18 +98,18 @@ graph TD
     Developer --> Tester
     Orchestrator --> DBA
     Orchestrator --> Reporter
-
+    
     Reporter --> Dash
     Dash -- "Sol·licita report" --> Main
     Main -- "Executa" --> Engine
     Engine -- "Llegeix" --> In
     Engine -- "Invoca" --> DBS
     DBS -- "SQL" --> DB[("Oracle DB")]
-
+    
     Engine -- "Enriqueix" --> Auditor
     Auditor -- "Context" --> AIS
     AIS -- "Prompt" --> LLM["OpenRouter LLM"]
-
+    
     Engine -- "Genera Dades" --> RepS
     RepS -- "Aplica Scores" --> ATIC_Rep
     ATIC_Rep -- "PDF/MD (Gesin's ATIC)" --> Out["Resultat Final"]
@@ -130,30 +130,30 @@ sequenceDiagram
     participant RepBuilder as Report Builder Skill
     participant ATIC as ATIC Reporting Agent
     participant Reporter as insights-reporting-e13bd
-
+    
     User->>Orch: Demana millores / auditoria
     Orch->>DBA: Valida i descriu els checks SQL
     DBA-->>Orch: Retorna queries validades
     Orch->>Dev: Implementa canvis a fitxers
-
+    
     User->>API: Sol·licita Auditoria Post-CRQ
     API->>Engine: Inicialitza Procés (run_post_crq)
     Engine->>DB: Executa Consultes SQL (Q01-Q19)
     DB-->>Engine: Dades Brutes (Oracle Rows)
-
+    
     Note over Engine, Agent: Si detecta CHECK 11 (N+1)
     Engine->>Agent: Analitza ineficiències codi (Chunking AI)
     Agent->>Agent: Avalua Semàntica (OpenRouter)
     Agent-->>Engine: Classificació (Mala Praxi / Fals Positiu)
-
+    
     Engine->>RepBuilder: Sol·licita Càlcul de Scores
     RepBuilder->>RepBuilder: Aplica Lògica E13BD (0-100) i Agrupació Lot
     RepBuilder-->>Engine: Dades Estructurades
-
+    
     Engine->>ATIC: Genera Document Final iterant JSON
     ATIC->>ATIC: Signatura Gesin's ATIC & Estils
     ATIC-->>Engine: Report Final (Styles Applied)
-
+    
     Engine-->>API: JSON / PDF Consolidat
     API-->>Reporter: Interpreta les Sortides
     Reporter-->>User: Visualització Resultats Globals
@@ -196,3 +196,4 @@ El fitxer `tests/test_check11_ai.py` valida:
 - **Fitxers Crítics**: `post_crq_audit.py` i `auditoria_post_crq.md`.
 - **Lectura recomanada**: Començar pel Markdown per entendre la lògica DB i seguir per `post_crq_check11_ai.py` per l'anàlisi semàntic.
 - **Propers Passos**: Implementar visualització HUD al frontend per als resultats d'IA.
+

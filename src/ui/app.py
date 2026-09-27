@@ -3,12 +3,12 @@ import pandas as pd
 import plotly.express as px
 import os
 import sys
-import oracledb
 
 # Afegir el directori d'arrel al path per permetre importacions de 'src'
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 from src.core.config_loader import ConfigLoader
+from src.core.oracle_client import ensure_oracle_thick_mode
 from src.core.db_manager import OracleDBManager
 from src.core.ai_assistant import AIAssistant
 from src.analytics.queries_oracle import OracleQueries
@@ -18,15 +18,14 @@ from src.analytics.scoring_engine import ScoringEngine
 def init_oracle():
     if "oracle_initialized" not in st.session_state:
         config_loader = ConfigLoader()
-        lib_dir = config_loader.get_env_var("ORACLE_CLIENT_LIB_DIR", "./instantclient")
-        if os.path.exists(lib_dir):
-            try:
-                oracledb.init_oracle_client(lib_dir=lib_dir)
-                st.session_state["oracle_initialized"] = True
-            except Exception as e:
-                st.error(f"Error inicialitzant Oracle Thick Mode: {e}")
-        else:
-            st.warning(f"No s'ha trobat l'Instant Client a: {lib_dir}")
+        try:
+            ensure_oracle_thick_mode(
+                {"ORACLE_CLIENT_LIB_DIR": config_loader.get_env_var("ORACLE_CLIENT_LIB_DIR")}
+            )
+            st.session_state["oracle_initialized"] = True
+        except RuntimeError as e:
+            st.error(str(e))
+            st.stop()
 
 init_oracle()
 # ----------------------------------------
