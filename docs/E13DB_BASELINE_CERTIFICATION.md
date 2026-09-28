@@ -3,7 +3,7 @@
 Repository: `Extr3sao/Analisis_BD`
 Branch: `migration/e13db`
 Migration commit: `b26a587da7cb1d5ccb6ea83a4a7a81525c55ac63`
-Certification worktree: uncommitted
+Certification commit: `8b40eae5680dd5d803d50991b751f14dc8c4d9b8`
 Date: 2026-09-28
 
 ## Backend
@@ -65,7 +65,15 @@ Tracked-file review found only templates, test fixtures, code references and doc
 
 Workflow: `.github/workflows/ci.yml`.
 
-It runs for pull requests targeting `main` and pushes to `main`, uses no Oracle/SMTP/OpenRouter credentials, and has no `continue-on-error` or `|| true` bypass for required checks. GitHub Actions status must be rechecked after the certification commit.
+It runs for pull requests targeting `main` and pushes to `main`, uses no Oracle/SMTP/OpenRouter credentials, and has no `continue-on-error` or `|| true` bypass for required checks.
+
+| Field | Result |
+| --- | --- |
+| Workflow | CI |
+| Run | 3 |
+| Status | completed |
+| Conclusion | success |
+| Commit | `8b40eae5680dd5d803d50991b751f14dc8c4d9b8` |
 
 ## External systems
 
@@ -75,13 +83,12 @@ It runs for pull requests targeting `main` and pushes to `main`, uses no Oracle/
 
 ## Known limitations
 
-- Direct Python dependencies are pinned to the versions installed for this baseline. Transitive dependencies are resolved by pip and are not hash-locked.
-- Transitive dependencies are not hash-locked; pip resolution was validated in the clean environment.
+- Direct Python dependencies are pinned to the versions installed for this baseline. Transitive dependencies are resolved by pip and are not hash-locked; resolution was validated in the clean environment.
 
 ## Decision
 
-`BASELINE_STATUS = NOT_CERTIFIED`
+`BASELINE_STATUS = CERTIFIED`
 
-`SAFE_TO_MERGE = NO`
+`SAFE_TO_MERGE = YES`
 
-All local certification gates pass. The remaining gate is a successful GitHub Actions run for the certification commit itself; the branch remains a draft pull request and must not be merged.
+All local certification gates and GitHub Actions run 3 for the certification commit pass. The branch remains a draft pull request and must not be merged without the requested review.

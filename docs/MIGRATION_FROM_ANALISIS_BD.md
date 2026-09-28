@@ -17,6 +17,10 @@ El historial Git anterior se conserva para trazabilidad. No es necesario conserv
 
 La migración se prepara en `migration/e13db`; `main` no se modifica hasta que la Pull Request sea revisada y aprobada.
 
+## Validación y certificación
+
+La migración fue validada y la baseline E13DB fue certificada. El commit de certificación es `8b40eae5680dd5d803d50991b751f14dc8c4d9b8`; GitHub Actions CI (run 3) finalizó correctamente (`success`). La PR permanece abierta y en borrador para revisión antes de cualquier merge.
+
 ## Rollback
 
 No se reescribe historial. Para recuperar el árbol previo, revise o cree una nueva rama desde `backup/pre-e13db-migration`; esta rama apunta exactamente al commit anterior de `main`. La Pull Request de migración permanece en borrador y no debe fusionarse hasta completar la certificación.
