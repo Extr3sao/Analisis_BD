@@ -14,7 +14,9 @@ El projecte unifica en una sola aplicacio:
 - programacio de jobs i distribucio automatica per lots
 - ajuda operativa integrada al frontend
 
-## Estat verificat
+## Estat de validació històric
+
+Les xifres d'aquesta secció són evidència històrica del projecte anterior i no certifiquen per si soles la migració actual. La certificació de la baseline de la branca de migració queda registrada a `docs/E13DB_BASELINE_CERTIFICATION.md`.
 
 Verificat el 27 de marc de 2026.
 
