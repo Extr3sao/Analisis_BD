@@ -39,6 +39,13 @@ class _FakeConnection:
 
 
 class TestOracleDBManager(unittest.TestCase):
+    def setUp(self):
+        self.thick_mode_patcher = patch("src.core.db_manager.ensure_oracle_thick_mode", return_value=None)
+        self.ensure_thick_mode = self.thick_mode_patcher.start()
+
+    def tearDown(self):
+        self.thick_mode_patcher.stop()
+
     def test_execute_query_closes_broken_connection_and_returns_none(self):
         manager = OracleDBManager({"USER": "u", "PASSWORD": "p", "DSN": "dsn"})
         cursor = _FakeCursor(execute_error=RuntimeError("oracle broken"))
@@ -52,6 +59,13 @@ class TestOracleDBManager(unittest.TestCase):
         self.assertTrue(connection.closed)
         self.assertIsNone(manager.connection)
         self.assertEqual(manager.last_error, "oracle broken")
+
+    def test_manager_requires_oracle_thick_mode_on_initialization(self):
+        config = {"USER": "u", "PASSWORD": "p", "DSN": "dsn", "ORACLE_CLIENT_LIB_DIR": "C:/oracle/instantclient"}
+
+        OracleDBManager(config)
+
+        self.ensure_thick_mode.assert_called_once_with(config)
 
     @patch("src.core.db_manager.oracledb.connect")
     def test_execute_query_reconnects_after_previous_failure(self, connect_mock):
@@ -86,18 +100,18 @@ class TestOracleDBManager(unittest.TestCase):
         sql = _sql_with_binds(check["sql"])
 
         params = {
-            "START_DATE": "2026-03-24",
-            "start_date": "2026-03-24",
-            "END_DATE": "2026-03-25",
-            "end_date": "2026-03-25",
+            "START_AT": "2026-03-24 00:00:00",
+            "start_at": "2026-03-24 00:00:00",
+            "END_AT": "2026-03-25 23:59:00",
+            "end_at": "2026-03-25 23:59:00",
             "DAYS_BACK": 1,
             "days_back": 1,
         }
 
         safe = OracleDBManager._filter_params_for_query(sql, params)
 
-        self.assertEqual(safe["start_date"], "2026-03-24")
-        self.assertEqual(safe["end_date"], "2026-03-25")
+        self.assertEqual(safe["start_at"], "2026-03-24 00:00:00")
+        self.assertEqual(safe["end_at"], "2026-03-25 23:59:00")
         self.assertNotIn("MI", safe)
 
     def test_filter_params_for_query_ignores_comments_with_apostrophes_in_check_06(self):
@@ -105,18 +119,18 @@ class TestOracleDBManager(unittest.TestCase):
         sql = _sql_with_binds(check["sql"])
 
         params = {
-            "START_DATE": "2026-03-24",
-            "start_date": "2026-03-24",
-            "END_DATE": "2026-03-25",
-            "end_date": "2026-03-25",
+            "START_AT": "2026-03-24 00:00:00",
+            "start_at": "2026-03-24 00:00:00",
+            "END_AT": "2026-03-25 23:59:00",
+            "end_at": "2026-03-25 23:59:00",
             "DAYS_BACK": 1,
             "days_back": 1,
         }
 
         safe = OracleDBManager._filter_params_for_query(sql, params)
 
-        self.assertEqual(safe["start_date"], "2026-03-24")
-        self.assertEqual(safe["end_date"], "2026-03-25")
+        self.assertEqual(safe["start_at"], "2026-03-24 00:00:00")
+        self.assertEqual(safe["end_at"], "2026-03-25 23:59:00")
         self.assertNotIn("MI", safe)
 
 

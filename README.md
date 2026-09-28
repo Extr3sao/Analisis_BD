@@ -1,6 +1,8 @@
-﻿# Dashboard E13BD
+﻿# E13DB
 
-Portal intern per a auditoria Oracle, control post-CRQ i automatitzacions de distribucio d'informes.
+E13DB es una plataforma de auditoría y análisis de bases de datos, orientada inicialmente a Oracle, con automatización de checks, auditorías Post-CRQ, reporting y seguimiento operativo.
+
+El historial anterior de Analisis_BD se conserva para trazabilidad. Consulte [la nota de migración](docs/MIGRATION_FROM_ANALISIS_BD.md) para el contexto y rollback.
 
 ## Objectiu
 
@@ -12,7 +14,9 @@ El projecte unifica en una sola aplicacio:
 - programacio de jobs i distribucio automatica per lots
 - ajuda operativa integrada al frontend
 
-## Estat verificat
+## Estat de validació històric
+
+Les xifres d'aquesta secció són evidència històrica del projecte anterior i no certifiquen per si soles la migració actual. La certificació de la baseline de la branca de migració queda registrada a `docs/E13DB_BASELINE_CERTIFICATION.md`.
 
 Verificat el 27 de marc de 2026.
 
@@ -343,7 +347,7 @@ npm run dev
 
 Runbook operatiu curt:
 
-- [operational-runbook.md](C:\Users\45485456N\OneDrive%20-%20Generalitat%20de%20Catalunya\.....Antigravity\Dashboard%20E13BD\operational-runbook.md)
+- [operational-runbook.md](docs/operations/operational-runbook.md)
 
 Frontend, des de `src/web-app`:
 
